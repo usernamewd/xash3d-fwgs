@@ -1,0 +1,634 @@
+#include "extdll.h"
+#include "util.h"
+#include "saverestore.h"
+#include "CBasePlayer.h"
+#include "CBaseSpectator.h"
+#include "hlds_hooks.h"
+#include "env/CSoundEnt.h"
+#include "gamerules.h"
+#include "game.h"
+#include "customentity.h"
+#include "weaponinfo.h"
+#include "usercmd.h"
+#include "netadr.h"
+#include "pm_shared.h"
+#include "voice_gamemgr.h"
+#include "TextMenu.h"
+#include "PluginManager.h"
+#include "te_effects.h"
+#include "nodes.h"
+#include "CWeaponCustom.h"
+
+extern CVoiceGameMgr g_VoiceGameMgr;
+extern int gmsgSayText;
+extern cvar_t allow_spectators;
+extern int g_teamplay;
+extern float g_flWeaponCheat;
+
+#if defined( _MSC_VER ) || defined( WIN32 )
+typedef wchar_t	uchar16;
+typedef unsigned int uchar32;
+#else
+typedef unsigned short uchar16;
+typedef unsigned int uchar32;
+#endif
+
+//-----------------------------------------------------------------------------
+// Purpose: determine if a uchar32 represents a valid Unicode code point
+//-----------------------------------------------------------------------------
+bool Q_IsValidUChar32(uchar32 uVal)
+{
+	// Values > 0x10FFFF are explicitly invalid; ditto for UTF-16 surrogate halves,
+	// values ending in FFFE or FFFF, or values in the 0x00FDD0-0x00FDEF reserved range
+	return (uVal < 0x110000u) && ((uVal - 0x00D800u) > 0x7FFu) && ((uVal & 0xFFFFu) < 0xFFFEu) && ((uVal - 0x00FDD0u) > 0x1Fu);
+}
+
+// Decode one character from a UTF-8 encoded string. Treats 6-byte CESU-8 sequences
+// as a single character, as if they were a correctly-encoded 4-byte UTF-8 sequence.
+int Q_UTF8ToUChar32(const char* pUTF8_, uchar32& uValueOut, bool& bErrorOut)
+{
+	const uint8* pUTF8 = (const uint8*)pUTF8_;
+
+	int nBytes = 1;
+	uint32 uValue = pUTF8[0];
+	uint32 uMinValue = 0;
+
+	// 0....... single byte
+	if (uValue < 0x80)
+		goto decodeFinishedNoCheck;
+
+	// Expecting at least a two-byte sequence with 0xC0 <= first <= 0xF7 (110...... and 11110...)
+	if ((uValue - 0xC0u) > 0x37u || (pUTF8[1] & 0xC0) != 0x80)
+		goto decodeError;
+
+	uValue = (uValue << 6) - (0xC0 << 6) + pUTF8[1] - 0x80;
+	nBytes = 2;
+	uMinValue = 0x80;
+
+	// 110..... two-byte lead byte
+	if (!(uValue & (0x20 << 6)))
+		goto decodeFinished;
+
+	// Expecting at least a three-byte sequence
+	if ((pUTF8[2] & 0xC0) != 0x80)
+		goto decodeError;
+
+	uValue = (uValue << 6) - (0x20 << 12) + pUTF8[2] - 0x80;
+	nBytes = 3;
+	uMinValue = 0x800;
+
+	// 1110.... three-byte lead byte
+	if (!(uValue & (0x10 << 12)))
+		goto decodeFinishedMaybeCESU8;
+
+	// Expecting a four-byte sequence, longest permissible in UTF-8
+	if ((pUTF8[3] & 0xC0) != 0x80)
+		goto decodeError;
+
+	uValue = (uValue << 6) - (0x10 << 18) + pUTF8[3] - 0x80;
+	nBytes = 4;
+	uMinValue = 0x10000;
+
+	// 11110... four-byte lead byte. fall through to finished.
+
+decodeFinished:
+	if (uValue >= uMinValue && Q_IsValidUChar32(uValue))
+	{
+	decodeFinishedNoCheck:
+		uValueOut = uValue;
+		bErrorOut = false;
+		return nBytes;
+	}
+decodeError:
+	uValueOut = '?';
+	bErrorOut = true;
+	return nBytes;
+
+decodeFinishedMaybeCESU8:
+	// Do we have a full UTF-16 surrogate pair that's been UTF-8 encoded afterwards?
+	// That is, do we have 0xD800-0xDBFF followed by 0xDC00-0xDFFF? If so, decode it all.
+	if ((uValue - 0xD800u) < 0x400u && pUTF8[3] == 0xED && (uint8)(pUTF8[4] - 0xB0) < 0x10 && (pUTF8[5] & 0xC0) == 0x80)
+	{
+		uValue = 0x10000 + ((uValue - 0xD800u) << 10) + ((uint8)(pUTF8[4] - 0xB0) << 6) + pUTF8[5] - 0x80;
+		nBytes = 6;
+		uMinValue = 0x10000;
+	}
+	goto decodeFinished;
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Returns true if UTF-8 string contains invalid sequences.
+//-----------------------------------------------------------------------------
+bool Q_UnicodeValidate(const char* pUTF8)
+{
+	bool bError = false;
+	while (*pUTF8)
+	{
+		uchar32 uVal;
+		// Our UTF-8 decoder silently fixes up 6-byte CESU-8 (improperly re-encoded UTF-16) sequences.
+		// However, these are technically not valid UTF-8. So if we eat 6 bytes at once, it's an error.
+		int nCharSize = Q_UTF8ToUChar32(pUTF8, uVal, bError);
+		if (bError || nCharSize == 6)
+			return false;
+		pUTF8 += nCharSize;
+	}
+	return true;
+}
+
+//// HOST_SAY
+// String comes in as
+// say blah blah blah
+// or as
+// blah blah blah
+//
+void Host_Say(edict_t* pEntity, int teamonly)
+{
+	char* p;
+	char    szTemp[256];
+	const char* pcmd = CMD_ARGV(0);
+
+	// We can get a raw string now, without the "say " prepended
+	if (CMD_ARGC() == 0)
+		return;
+
+	entvars_t* pev = &pEntity->v;
+	CBasePlayer* player = GetClassPtr((CBasePlayer*)pev);
+
+	//Not yet.
+	if (player->m_flNextChatTime > gpGlobals->time)
+		return;
+
+	if (!stricmp(pcmd, "say") || !stricmp(pcmd, "say_team"))
+	{
+		if (CMD_ARGC() >= 2)
+		{
+			p = (char*)CMD_ARGS();
+		}
+		else
+		{
+			// say with a blank message, nothing to do
+			return;
+		}
+	}
+	else  // Raw text, need to prepend argv[0]
+	{
+		if (CMD_ARGC() >= 2)
+		{
+			snprintf(szTemp, 256, "%s %s", (char*)pcmd, (char*)CMD_ARGS());
+		}
+		else
+		{
+			// Just a one word command, use the first word...sigh
+			snprintf(szTemp, 256, "%s", (char*)pcmd);
+		}
+		p = szTemp;
+	}
+
+	// remove quotes if present
+	if (*p == '"')
+	{
+		p++;
+		p[strlen(p) - 1] = 0;
+	}
+
+	// make sure the text has content
+
+	if (!p || !p[0] || !Q_UnicodeValidate(p))
+		return;  // no character found, so say nothing
+
+	uint32_t mutes = 0;
+	CALL_HOOKS_VOID(pfnChatMessage, player, (const char**)&p, teamonly, mutes);
+
+	player->m_flNextChatTime = gpGlobals->time + mp_chat_interval.value;
+
+	UTIL_ClientSay(player, p, NULL, teamonly, NULL, mutes);
+
+	// echo to server console for listen servers, dedicated servers should have logs enabled
+	if (!IS_DEDICATED_SERVER())
+		g_engfuncs.pfnServerPrint(p);
+
+	const char* temp;
+	if (teamonly)
+		temp = "say_team";
+	else
+		temp = "say";
+
+	UTIL_LogPlayerEvent(player->edict(), "%s \"%s\"\n", temp, p);
+}
+
+#define ABORT_IF_CHEATS_DISABLED(cheatName) \
+if (CVAR_GET_FLOAT("sv_cheats") == 0) {\
+	CLIENT_PRINTF(pEntity, print_center, UTIL_VarArgs(cheatName " N/A: Cheats disabled\n")); \
+	return true; \
+}
+
+bool CheatCommand(edict_t* pEntity) {
+	const char* pcmd = CMD_ARGV(0);
+
+	entvars_t* pev = &pEntity->v;
+	CBasePlayer* plr = CBaseEntity::Instance(pEntity)->MyPlayerPointer();
+
+	if (FStrEq(pcmd, "cl_noclip") || FStrEq(pcmd, "noclip")) {
+		ABORT_IF_CHEATS_DISABLED("No clip");
+		if (plr) {
+			plr->m_noclip = !plr->m_noclip;
+			if (!plr->m_noclip)
+				pev->movetype = MOVETYPE_WALK;
+			plr->ApplyEffects();
+			CLIENT_PRINTF(pEntity, print_center, UTIL_VarArgs("No clip is %s\n", plr->m_noclip ? "ON" : "OFF"));
+		}
+	}
+	else if (FStrEq(pcmd, "godmode") || FStrEq(pcmd, "god")) {
+		ABORT_IF_CHEATS_DISABLED("God mode");
+		if (plr) {
+			plr->m_godmode = !plr->m_godmode;
+			if (!plr->m_godmode)
+				plr->pev->flags &= ~FL_GODMODE;
+			plr->ApplyEffects();
+			CLIENT_PRINTF(pEntity, print_center, UTIL_VarArgs("God mode is %s\n", plr->m_godmode ? "ON" : "OFF"));
+		}
+	}
+	else if (FStrEq(pcmd, "cl_notarget") || FStrEq(pcmd, "notarget")) {
+		ABORT_IF_CHEATS_DISABLED("No target");
+		if (plr) {
+			plr->m_notarget = !plr->m_notarget;
+			if (!plr->m_godmode)
+				plr->pev->flags &= ~FL_NOTARGET;
+			plr->ApplyEffects();
+			CLIENT_PRINTF(pEntity, print_center, UTIL_VarArgs("No target is %s\n", plr->m_notarget ? "ON" : "OFF"));
+		}
+	}
+	else if (FStrEq(pcmd, "instakill")) {
+		ABORT_IF_CHEATS_DISABLED("No target");
+		if (plr) {
+			plr->m_instakill = !plr->m_instakill;
+			plr->ApplyEffects();
+			CLIENT_PRINTF(pEntity, print_center, UTIL_VarArgs("Instakill mode is %s\n", plr->m_instakill ? "ON" : "OFF"));
+		}
+	}
+	else if (FStrEq(pcmd, "revive")) {
+		ABORT_IF_CHEATS_DISABLED("Revive");
+
+		CBaseMonster* ent = CBaseEntity::Instance(pEntity)->MyMonsterPointer();
+
+		if (ent && !ent->IsAlive()) {
+			ent->Revive();
+			CLIENT_PRINTF(pEntity, print_center, "Revived!\n");
+		}
+	}
+	else if (FStrEq(pcmd, "strip")) {
+		ABORT_IF_CHEATS_DISABLED("Strip");
+
+		CBasePlayer* ent = CBaseEntity::Instance(pEntity)->MyPlayerPointer();
+
+		if (ent) {
+			ent->RemoveAllItems(true);
+			CLIENT_PRINTF(pEntity, print_center, "Stripped!\n");
+		}
+	}
+	else if (FStrEq(pcmd, "nodes")) {
+		ABORT_IF_CHEATS_DISABLED("nodes");
+
+		CBasePlayer* ent = CBaseEntity::Instance(pEntity)->MyPlayerPointer();
+
+		if (ent) {
+			ent->m_debugFlags ^= DF_NODES;
+			CLIENT_PRINTF(pEntity, print_center, "Nodes enabled\n");
+		}
+	}
+	else if (FStrEq(pcmd, "route")) {
+		ABORT_IF_CHEATS_DISABLED("Route");
+
+		CBasePlayer* ent = CBaseEntity::Instance(pEntity)->MyPlayerPointer();
+
+		if (ent) {
+			int iSrc = atoi(CMD_ARGV(1));
+			int iDst = atoi(CMD_ARGV(2));
+			int iHull = CMD_ARGC() > 3 ? atoi(CMD_ARGV(3)) : NODE_HUMAN_HULL;
+			int iCap = CMD_ARGC() > 4 ? atoi(CMD_ARGV(4)) : bits_CAP_DOORS_GROUP;
+			int iPath[MAX_PATH_SIZE];
+			int iResult = WorldGraph.FindShortestPath(iPath, iSrc, iDst, iHull, iCap);
+			if (iResult) {
+				CLIENT_PRINTF(pEntity, print_console, UTIL_VarArgs("\nPath from %d to %d (HULL %d):\n", iSrc, iDst, iResult, iHull));
+				for (int i = 0; i < iResult; i++) {
+					CLIENT_PRINTF(pEntity, print_console, UTIL_VarArgs("%d", iPath[i]));
+					if (i < iResult-1)
+						CLIENT_PRINTF(pEntity, print_console, ", ");
+				}
+				CLIENT_PRINTF(pEntity, print_console, "\n\n");
+			}
+			else {
+				CLIENT_PRINTF(pEntity, print_console, UTIL_VarArgs("No path from %d to %d (HULL %d)\n", iSrc, iDst, iHull));
+			}
+		}
+	}
+	else if (FStrEq(pcmd, "break")) {
+		ABORT_IF_CHEATS_DISABLED("Break");
+
+		CBasePlayer* ent = CBaseEntity::Instance(pEntity)->MyPlayerPointer();
+
+		if (ent) {
+			const char* trigger = CMD_ARGV(1);
+			g_debug_target = ALLOC_STRING(trigger);
+			CLIENT_PRINTF(pEntity, print_console, UTIL_VarArgs("Breakpoint placed for trigger '%s'", trigger));
+			ALERT(at_logged, UTIL_VarArgs("Breakpoint placed for trigger '%s'\n", trigger));
+		}
+	}
+	else if (FStrEq(pcmd, "trigger") || FStrEq(pcmd, "trigger0") || FStrEq(pcmd, "trigger1") || FStrEq(pcmd, "trigger2")) {
+		ABORT_IF_CHEATS_DISABLED("Trigger");
+		
+		bool shouldkill = FStrEq(pcmd, "trigger2");
+		USE_TYPE triggerMode = USE_TOGGLE;
+		
+		if (FStrEq(pcmd, "trigger0")) {
+			triggerMode = USE_OFF;
+		}
+		if (FStrEq(pcmd, "trigger1")) {
+			triggerMode = USE_ON;
+		}
+
+		const char* target = CMD_ARGV(1);
+		CBaseEntity* world = (CBaseEntity*)GET_PRIVATE(INDEXENT(0));
+		int count = 0;
+
+		string_t lastTriggerClass = 0;
+
+		if (target[0] != '\0') {
+			std::vector<CBaseEntity*> targets;
+			CBaseEntity* pTarget = NULL;
+
+			while ((pTarget = UTIL_FindEntityByClassname(pTarget, target))) {
+				targets.push_back(pTarget);
+			}
+			while ((pTarget = UTIL_FindEntityByTargetname(pTarget, target))) {
+				targets.push_back(pTarget);
+			}
+			
+			for (CBaseEntity* ent : targets) {
+				te_debug_beam(pEntity->v.origin, ent->Center(), 10, RGBA(0, 255, 0), MSG_ONE_UNRELIABLE, pEntity);
+				if (shouldkill) {
+					UTIL_Remove(ent);
+				}
+				else {
+					ent->Use(world, world, triggerMode, 0);
+				}
+				count++;
+				lastTriggerClass = ent->pev->classname;
+			}
+		}
+		else {
+			UTIL_MakeVectors(pev->v_angle + pev->punchangle);
+			Vector aimDir = gpGlobals->v_forward;
+			Vector vecSrc = pev->origin + pev->view_ofs;
+
+			TraceResult tr;
+			TRACE_LINE(vecSrc, vecSrc + aimDir * 4096, dont_ignore_monsters, pEntity, &tr);
+
+			CBaseEntity* activator = CBaseEntity::Instance(pEntity);
+			CBaseEntity* phit = CBaseEntity::Instance(tr.pHit);
+			if (activator && phit && !FNullEnt(tr.pHit)) {
+				if (shouldkill) {
+					UTIL_Remove(phit);
+				}
+				else {
+					phit->Use(activator, activator, triggerMode, 0);
+				}
+				count++;
+				lastTriggerClass = phit->pev->classname;
+			}
+		}
+
+		if (count > 1) {
+			EMIT_SOUND(ENT(pev), CHAN_ITEM, "common/wpn_denyselect.wav", 0.4, ATTN_NORM);
+			CLIENT_PRINTF(pEntity, print_center, UTIL_VarArgs("Triggered %d entities\n", count));
+		}
+		else if (count == 1) {
+			CLIENT_PRINTF(pEntity, print_center, UTIL_VarArgs("Triggered a %s\n", STRING(lastTriggerClass)));
+		}
+		
+		EMIT_SOUND(ENT(pev), CHAN_ITEM, count > 0 ? "common/wpn_select.wav" : "common/wpn_denyselect.wav", 0.4, ATTN_NORM);
+	}
+	else {
+		return false;
+	}
+
+	return true;
+}
+
+// Use CMD_ARGV,  CMD_ARGV, and CMD_ARGC to get pointers the character string command.
+void ClientCommand(edict_t* pEntity)
+{
+	// Is the client spawned yet?
+	if (!pEntity->pvPrivateData)
+		return;
+
+	entvars_t* pev = &pEntity->v;
+
+	CBasePlayer* pPlayer = GetClassPtr((CBasePlayer*)pev);
+
+	if (!pPlayer) {
+		return;
+	}
+
+	CALL_HOOKS_VOID(pfnClientCommand, pPlayer);
+
+	TextMenuClientCommandHook(pPlayer);
+
+	const char* pcmd = CMD_ARGV(0);
+	const char* pstr;
+
+	if (strcmp("VModEnable", pcmd) && strcmp("specmode", pcmd) && strcmp("vban", pcmd) && pcmd[0] != '-') {
+		pPlayer->m_lastUserInput = g_engfuncs.pfnTime();
+	}
+
+	if (CheatCommand(pEntity)) {
+		return;
+	}
+	else if (FStrEq(pcmd, "fullupdate"))
+	{
+		pPlayer->ForceClientDllUpdate();
+	}
+	else if (FStrEq(pcmd, "give"))
+	{
+		if (g_flWeaponCheat != 0.0)
+		{
+			int iszItem = ALLOC_STRING(CMD_ARGV(1));	// Make a copy of the classname
+			pPlayer->GiveNamedItem(STRING(iszItem));
+		}
+	}
+	else if (FStrEq(pcmd, "drop"))
+	{
+		// player is dropping an item. 
+		pPlayer->DropPlayerItem((char*)CMD_ARGV(1));
+	}
+	else if (FStrEq(pcmd, "dropammo"))
+	{
+		// player is dropping an item. 
+		pPlayer->DropAmmo(false);
+	}
+	else if (FStrEq(pcmd, "dropammo2"))
+	{
+		// player is dropping an item. 
+		pPlayer->DropAmmo(true);
+	}
+	else if (FStrEq(pcmd, "fov"))
+	{
+		if (g_flWeaponCheat && CMD_ARGC() > 1)
+		{
+			pPlayer->m_iFOV = atoi(CMD_ARGV(1));
+		}
+		else
+		{
+			CLIENT_PRINTF(pEntity, print_console, UTIL_VarArgs("\"fov\" is \"%d\"\n", (int)GetClassPtr((CBasePlayer*)pev)->m_iFOV));
+		}
+	}
+	else if (FStrEq(pcmd, "use"))
+	{
+		pPlayer->SelectItem((char*)CMD_ARGV(1));
+	}
+	else if (g_weaponNames.hasKey(pcmd))
+	{
+		// custom weapon was selected (weapon name includes a folder path to force clients to load HUD files from there)
+		const char* wepCname = pcmd;
+		size_t dirEnd = std::string(pcmd).rfind("/");
+		if (dirEnd != std::string::npos) {
+			wepCname = pcmd + dirEnd + 1;
+		}
+
+		pPlayer->SelectItem(wepCname);
+	}
+	else if (((pstr = strstr(pcmd, "weapon_")) != NULL) && (pstr == pcmd))
+	{
+		pPlayer->SelectItem(pcmd);
+	}
+	else if (FStrEq(pcmd, "lastinv"))
+	{
+		pPlayer->SelectLastItem();
+	}
+	else if (FStrEq(pcmd, "spectate"))	// clients wants to become a spectator
+	{
+		// always allow proxies to become a spectator
+		if ((pev->flags & FL_PROXY) || allow_spectators.value)
+		{
+			float cooldown = mp_respawndelay.value + pPlayer->m_extraRespawnDelay;
+			if (gpGlobals->time - pPlayer->m_lastObserverSwitch < cooldown) {
+				float timeleft = cooldown - (gpGlobals->time - pPlayer->m_lastObserverSwitch);
+				CLIENT_PRINTF(pPlayer->edict(), print_center, UTIL_VarArgs("Wait %.1f seconds", timeleft));
+			}
+			else if( pev->iuser1 == OBS_NONE )
+			{
+				pPlayer->StartObserver(pev->origin, pev->angles);
+
+				pPlayer->pev->v_angle = g_vecZero;
+				pPlayer->pev->velocity = g_vecZero;
+				pPlayer->pev->punchangle = g_vecZero;
+				pPlayer->pev->fixangle = TRUE;
+
+				// notify other clients of player switching to spectator mode
+				UTIL_ClientPrintAll(print_chat, UTIL_VarArgs("%s is now spectating\n",
+					(pev->netname && STRING(pev->netname)[0] != 0) ? STRING(pev->netname) : "\\disconnected\\"));
+			}
+			else
+			{
+				edict_t* pentSpawnSpot = g_pGameRules->GetPlayerSpawnSpot(pPlayer);
+
+				if (FNullEnt(pentSpawnSpot)) {
+					pPlayer->m_wantToExitObserver = true;
+					UTIL_ClientPrint(pPlayer, print_chat, "Can't stop spectating. No spawn points are available.\n");
+				}
+				else {
+					pPlayer->LeaveObserver();
+					UTIL_ClientPrintAll(print_chat, UTIL_VarArgs("%s stopped spectating\n",
+						(pev->netname&& STRING(pev->netname)[0] != 0) ? STRING(pev->netname) : "\\disconnected\\"));
+				}
+			}
+		}
+		else
+			UTIL_ClientPrint(pPlayer, print_console, "Spectator mode is disabled.\n");
+
+	}
+	else if (FStrEq(pcmd, "specmode"))	// new spectator mode
+	{
+		if (pPlayer->IsObserver())
+			pPlayer->Observer_SetMode(atoi(CMD_ARGV(1)));
+	}
+	else if (FStrEq(pcmd, "closemenus"))
+	{
+		// just ignore it
+	}
+	else if (FStrEq(pcmd, "follownext"))	// follow next player
+	{
+		if (pPlayer->IsObserver())
+			pPlayer->Observer_FindNextPlayer(atoi(CMD_ARGV(1)) ? true : false);
+	}
+	else if (FStrEq(pcmd, "listplugins"))
+	{
+		g_pluginManager.ListPlugins(pPlayer);
+	}
+	else if (g_pGameRules->ClientCommand(pPlayer, pcmd))
+	{
+		// MenuSelect returns true only if the command is properly handled,  so don't print a warning
+	}
+	else if (g_pluginManager.ClientCommand(pPlayer)) {
+		// plugin handled the command
+	}
+	else if (FStrEq(pcmd, "say"))
+	{
+		Host_Say(pEntity, 0);
+	}
+	else if (FStrEq(pcmd, "say_team"))
+	{
+		Host_Say(pEntity, 1);
+	}
+	else if (FStrEq(pcmd, "gibme"))
+	{
+		if (pPlayer->IsAlive()) {
+			pev->health = 0;
+			pPlayer->Killed(pev, GIB_ALWAYS);
+
+			EHANDLE oldWeapon = pPlayer->m_pActiveItem;
+			pPlayer->m_pActiveItem = NULL; // don't show a weapon icon in the kill feed
+			g_pGameRules->DeathNotice(pPlayer, pev, pev);
+			pPlayer->m_pActiveItem = oldWeapon;
+
+			SpawnBlood(pPlayer->pev->origin, pPlayer->BloodColor(), 1000);
+		}
+	}
+	else if (FStrEq(pcmd, "dumpwepcfg"))
+	{
+		if (AdminLevel(pPlayer) != ADMIN_NO) {
+			CWeaponCustom* wep = pPlayer->m_pActiveItem ? pPlayer->m_pActiveItem->MyWeaponCustomPtr() : NULL;
+			if (wep) {
+				const char* path = UTIL_VarArgs("dump/%s.txt", STRING(wep->pev->classname));
+				UTIL_DumpCustomWeaponConfig(path, wep->params, true);
+			}
+			else {
+				UTIL_ClientPrint(pPlayer, print_chat, "Not holding a custom weapon.\n");
+			}
+		}
+		else {
+			UTIL_ClientPrint(pPlayer, print_chat, "Admins only.\n");
+		}
+	}
+	else
+	{
+		// tell the user they entered an unknown command
+		char command[128];
+
+		// check the length of the command (prevents crash)
+		// max total length is 192 ...and we're adding a string below ("Unknown command: %s\n")
+		strncpy(command, pcmd, 127);
+		command[127] = '\0';
+
+		// First parse the name and remove any %'s
+		for (char* pApersand = command; pApersand != NULL && *pApersand != 0; pApersand++)
+		{
+			// Replace it with a space
+			if (*pApersand == '%')
+				*pApersand = ' ';
+		}
+
+		// tell the user they entered an unknown command
+		UTIL_ClientPrint(pPlayer, print_console, UTIL_VarArgs("Unknown command: %s\n", command));
+	}
+}

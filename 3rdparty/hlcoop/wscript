@@ -1,0 +1,143 @@
+#! /usr/bin/env python
+# encoding: utf-8
+#
+# Waf wrapper for the SevenKewp Half-Life co-op gamedll port.
+# The mod uses a CMake build natively; this wscript invokes that
+# build out-of-tree so xash3d-fwgs's `./waf build` produces the
+# server.so artifact in build/3rdparty/hlcoop/output/dlls/server.so
+# and installs it under <gamedir>/dlls/server.so when packaging is on.
+#
+# To enable, configure with --enable-hlcoop.
+
+import os
+import shutil
+import subprocess
+from waflib import Logs, Task, TaskGen, Errors
+
+
+def options(opt):
+    pass
+
+
+def configure(conf):
+    if not conf.env.ENABLE_HLCOOP:
+        return
+
+    cmake = conf.find_program('cmake', mandatory=True, var='CMAKE')[0]
+
+    # 32-bit build is the canonical GoldSrc ABI.  Default off on hosts
+    # that lack a multilib toolchain (most modern Linux distros).
+    multilib_ok = False
+    try:
+        # Probe whether the compiler can produce AND LINK 32-bit binaries.
+        # `-m32 -c` succeeds on systems that lack 32-bit crt/libc, so we
+        # have to attempt a full link to be sure the toolchain is usable.
+        cc = conf.env.CC[0] if conf.env.CC else 'cc'
+        r = subprocess.run([cc, '-m32', '-x', 'c', '-shared',
+                            '-o', '/dev/null', '-'],
+                           input=b'int dummy(void){return 0;}',
+                           stderr=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL)
+        multilib_ok = (r.returncode == 0)
+    except Exception:
+        multilib_ok = False
+
+    conf.env.HLCOOP_M32 = multilib_ok
+    if multilib_ok:
+        Logs.info('hlcoop: building 32-bit gamedll (matches stock GoldSrc ABI)')
+    else:
+        Logs.warn('hlcoop: 32-bit toolchain not available, building 64-bit gamedll '
+                  '(usable with xash3d-fwgs configured with -8/--64bits)')
+
+
+class cmake_build_hlcoop(Task.Task):
+    color = 'CYAN'
+    quiet = True
+    always_run = True
+
+    def run(self):
+        src = self.hlcoop_src
+        bdir = self.hlcoop_bld
+        os.makedirs(bdir, exist_ok=True)
+
+        cmake = self.cmake
+        m32 = 'ON' if self.m32 else 'OFF'
+        configure_cmd = [
+            cmake, '-S', src, '-B', bdir,
+            '-DCMAKE_BUILD_TYPE=Release',
+            '-DBUILD_SERVER=ON',
+            '-DBUILD_CLIENT=OFF',
+            '-DHLCOOP_M32=' + m32,
+        ]
+        Logs.info('hlcoop: configuring (cmake): %s', ' '.join(configure_cmd))
+        r = subprocess.run(configure_cmd)
+        if r.returncode != 0:
+            return r.returncode
+
+        build_cmd = [cmake, '--build', bdir, '-j',
+                     str(int(os.environ.get('JOBS', os.cpu_count() or 4)))]
+        Logs.info('hlcoop: building (cmake): %s', ' '.join(build_cmd))
+        r = subprocess.run(build_cmd)
+        return r.returncode
+
+
+@TaskGen.feature('hlcoop_cmake')
+def process_hlcoop_cmake(self):
+    tsk = self.create_task('cmake_build_hlcoop')
+    # Use the paths captured by the wscript build() function (set on the
+    # task generator before this feature method runs), falling back to
+    # the bld.path values for callers that did not pre-resolve them.
+    src_dir = getattr(self, 'hlcoop_src', None) or self.bld.path.abspath()
+    bld_dir = getattr(self, 'hlcoop_bld', None) or self.bld.path.get_bld().abspath()
+
+    # 32-bit GoldSrc default vs xash3d-fwgs platform-suffix scheme
+    if self.env.HLCOOP_M32:
+        out_name = 'server.so'
+    else:
+        out_name = 'server_amd64.so'
+    out = self.bld.root.make_node(os.path.join(bld_dir, 'output/dlls/' + out_name))
+    tsk.set_outputs(out)
+
+    cmake_list = self.env.CMAKE if self.env.CMAKE else self.bld.all_envs.get(
+        '3rdparty/hlcoop', self.env).CMAKE
+    tsk.cmake = cmake_list[0] if cmake_list else (shutil.which('cmake') or 'cmake')
+    tsk.m32 = bool(self.env.HLCOOP_M32)
+    tsk.hlcoop_src = src_dir
+    tsk.hlcoop_bld = bld_dir
+    self.hlcoop_artifact = out
+
+
+def build(bld):
+    if not bld.env.ENABLE_HLCOOP:
+        return
+
+    # Skip during clang-compilation-database collection: cmake_build_hlcoop
+    # is an opaque external build, so emitting a clangdb entry for it has no
+    # value and would invoke the heavy cmake step at clangdb time.
+    if bld.cmd in ('clangdb', 'clean', 'install_files'):
+        return
+
+    # Resolve paths now while bld.path is still anchored to this wscript's
+    # directory (3rdparty/hlcoop).  By the time the task runs in process(),
+    # bld.path can have moved.
+    src_dir = bld.path.abspath()
+    bld_dir = bld.path.get_bld().abspath()
+
+    tg = bld(features='hlcoop_cmake', name='hlcoop_server')
+    tg.hlcoop_src = src_dir
+    tg.hlcoop_bld = bld_dir
+
+    # Install the built gamedll into <prefix>/<gamedir>/dlls/ when
+    # the user has enabled packaging (-P).  Otherwise it sits in the
+    # build directory only.
+    if bld.env.DEST_OS not in ['android']:
+        gamedir = 'hlcoop'
+        sharedir = bld.env.SHAREDIR
+        if isinstance(sharedir, list):
+            sharedir = sharedir[0] if sharedir else None
+        if sharedir:
+            install_path = os.path.join(sharedir, gamedir, 'dlls')
+            out_name = 'server.so' if bld.env.HLCOOP_M32 else 'server_amd64.so'
+            artifact = bld.path.get_bld().find_or_declare('output/dlls/' + out_name)
+            bld.install_files(install_path, [artifact],
+                              chmod=0o755, postpone=True)

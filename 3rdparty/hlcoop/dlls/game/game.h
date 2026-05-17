@@ -1,0 +1,246 @@
+/***
+*
+*	Copyright (c) 1996-2001, Valve LLC. All rights reserved.
+*	
+*	This product contains software technology licensed from Id 
+*	Software, Inc. ("Id Technology").  Id Technology (c) 1996 Id Software, Inc. 
+*	All Rights Reserved.
+*
+*   Use, distribution, and modification of this source code and/or resulting
+*   object code is restricted to non-commercial enhancements to products from
+*   Valve LLC.  All other use, distribution, or modification is prohibited
+*   without written permission from Valve LLC.
+*
+****/
+
+#ifndef GAME_H
+#define GAME_H
+
+#include "CKeyValue.h"
+#include "voice_gamemgr.h"
+#include <unordered_map>
+#include <string>
+#include "HashMap.h"
+
+extern void GameDLLInit( void );
+
+#define DEFAULT_TEAM_NAME "Team" // name seen in the scoreboard
+#define ENEMY_TEAM_NAME "Bad Guys" // name seen in the scoreboard
+#define DEFAULT_TEAM_COLOR 1
+#define ENEMY_TEAM_COLOR 2
+#define NEUTRAL_TEAM_COLOR 3
+#define FRIEND_TEAM_COLOR 4
+#define OBSERVER_TEAM_COLOR 6 // spectator color (white on windows, still blue on linux?)
+
+EXPORT extern cvar_t	displaysoundlist;
+
+// multiplayer server rules
+EXPORT extern cvar_t	teamplay;
+EXPORT extern cvar_t	fraglimit;
+EXPORT extern cvar_t	timelimit;
+EXPORT extern cvar_t	friendlyfire;
+EXPORT extern cvar_t	falldamage;
+EXPORT extern cvar_t	weaponstay;
+EXPORT extern cvar_t	item_despawn_time;
+EXPORT extern cvar_t	item_repick_time;
+EXPORT extern cvar_t	max_item_drops;
+EXPORT extern cvar_t	forcerespawn;
+EXPORT extern cvar_t	flashlight;
+EXPORT extern cvar_t	aimcrosshair;
+EXPORT extern cvar_t	decalfrequency;
+EXPORT extern cvar_t	teamlist;
+EXPORT extern cvar_t	teamoverride;
+EXPORT extern cvar_t	defaultteam;
+EXPORT extern cvar_t	allowmonsters;
+EXPORT extern cvar_t	mp_nextmap; // map which will load after the next intermission
+EXPORT extern cvar_t	mp_starthealth;
+EXPORT extern cvar_t	mp_startarmor;
+EXPORT extern cvar_t	mp_bulletsponges; // prevent mappers setting high npc health for no good reason
+EXPORT extern cvar_t	mp_bulletspongemax; // max health multiplier for any monster
+EXPORT extern cvar_t	mp_maxmonsterrespawns; // limit monster respawns which affect no entity logic
+EXPORT extern cvar_t	mp_edictsorting; // sorts edict list by entity index priority
+EXPORT extern cvar_t	mp_shitcode; // conditionally enables shitty code that fixes critical problems in specific maps, but subtly breaks many others
+EXPORT extern cvar_t	mp_survival_supported;
+EXPORT extern cvar_t	mp_survival_starton;
+EXPORT extern cvar_t	mp_survival_restart;
+EXPORT extern cvar_t	mp_mergemodels; // used merged models to save on model slots
+EXPORT extern cvar_t	mp_killfeed; // 0 = off, 1 = player deaths, 2 = player kills/deaths, 3 = player + monster kills/deaths
+EXPORT extern cvar_t	pluginlistfile; // name of the plugin list file
+EXPORT extern cvar_t	adminlistfile; // name of the admin list file
+EXPORT extern cvar_t	pluginupdatepath; // root path for plugin file updates to be searched
+EXPORT extern cvar_t	pluginautoupdate; // attempt to update plugins after every map change
+EXPORT extern cvar_t	mp_skill_allow; // 0 = no, 1 = yes
+EXPORT extern cvar_t	mp_default_medkit; // provide a medkit by default unless nomedkit is in the cfg
+EXPORT extern cvar_t	mp_rpg_laser_mode; // 0 = HL, 1 = realistic, 2 = rockets follow owner's laser
+EXPORT extern cvar_t	mp_series_intermission; // 0 = allow game_end, 1 = skip game_end, 2 = skip waiting period and show a message for series level changes
+EXPORT extern cvar_t	mp_score_mode; // 0 = get points for damage, 1 = point multiplier reduced after death + no suicide penalty
+EXPORT extern cvar_t	mp_damage_points; // score points given per point of damage dealt
+EXPORT extern cvar_t	mp_antiblock; // enables player swapping with +use
+EXPORT extern cvar_t	mp_antiblock_cooldown; // how long a player needs to wait before swapping again after a "rude" swap
+EXPORT extern cvar_t	mp_min_score_mult; // minimum score multiplier for death penalties
+EXPORT extern cvar_t	mp_hevsuit_voice; // enable/disable the hev suit voice
+EXPORT extern cvar_t	npc_dropweapons; // enable/disable npcs dropping weapons
+EXPORT extern cvar_t	mp_bigmap; // precaches models/sounds so common effects can work outside +/-4096
+EXPORT extern cvar_t	mp_max_pvs_corpses; // limit number of corpses in a VIS zone
+EXPORT extern cvar_t	mp_weaponhands; // set default weapon model hands (hl, op4, bshift)
+EXPORT extern cvar_t	mp_chat_interval; // suppress player chats faster than this (seconds)
+EXPORT extern cvar_t	mp_perf; // enables performance logging
+EXPORT extern cvar_t	mp_debug_tracers; // compare your client predicted tracers with the server tracers
+EXPORT extern cvar_t	mp_sevenkewp_client_notice; // tell players where to download the sevenkewp client so they can use all the weapons
+EXPORT extern cvar_t	mp_hud_color; // default HUD color for this map (3 digit hex string "FFF")
+EXPORT extern cvar_t	sv_colorcon; // colorize the server console
+EXPORT extern cvar_t	mp_flashlight_drain; // how fast the flashlight drains (1.0 = 100%, 0 = never)
+EXPORT extern cvar_t	mp_flashlight_charge; // how fast the flashlight charges (1.0 = 100%, 0 = never
+EXPORT extern cvar_t	mp_flashlight_size; // size of the flashlight beam (1.0 = 100%)
+EXPORT extern cvar_t	mp_startflashlight; // 0-100 = give flashlight with this battery level, -1 = don't spawn with flashlight
+EXPORT extern cvar_t	mp_blood_scale; // scale applied to blood sprite effects
+EXPORT extern cvar_t	mp_blood_head; // 1 = headshots blood effects are always max size
+EXPORT extern cvar_t	mp_blood_color_human; // engine palette index for the blood effect
+EXPORT extern cvar_t	mp_blood_color_alien; // engine palette index for the blood effect
+EXPORT extern cvar_t	mp_one_pickup_per_player; // items don't respawn, but each player can pick the same item once. 0 = off, 1 = on
+EXPORT extern cvar_t	mp_keep_inventory; // 1 = players add their previous map inventory to the next map's default loadout. 2 = players keep their inventory exactly as it was in the previous map. If they die and respawn, or join for the first time, they get the map default inventory.
+EXPORT extern cvar_t	mp_use_only_pickups; // 1 = all pickups will be forced into use-only mode
+
+// Enables classic func_pushable physics (which is horribly broken, but fun)
+// The higher your FPS, the faster you can boost pushables. You also get boosted.
+EXPORT extern cvar_t	mp_objectboost;
+
+// Enables classic hit detection for explosives (grenade in vent hits everything nearby)
+EXPORT extern cvar_t	mp_explosionbug;
+
+// write network messages to log file for debugging
+EXPORT extern cvar_t	mp_debugmsg;
+
+EXPORT extern cvar_t	mp_respawndelay;
+
+// if a map cfg asks for a default max speed (320 for Half-Life, 270 for Sven Co-op),
+// then ignore the command and use whatever was set up by the server.cfg
+EXPORT extern cvar_t	mp_prefer_server_maxspeed;
+
+// limits monster sound variety to save precache slots.
+// 0 disables. 1+ = max sounds per action (death/pain/idle/etc.)
+EXPORT extern cvar_t	soundvariety;
+
+// disables idle talking for some npcs to save precache slots (otis/fgrunt/bodyguard/rgrunt/strooper)
+EXPORT extern cvar_t	mp_npcidletalk;
+
+EXPORT extern cvar_t	mp_npckill;
+EXPORT extern cvar_t	killnpc; // legacy setting. When set to 0, makes scientists and barneys invulnerable
+
+// Engine Cvars
+EXPORT extern cvar_t	*g_psv_gravity;
+EXPORT extern cvar_t	*g_psv_aim;
+EXPORT extern cvar_t	*g_psv_allow_autoaim;
+EXPORT extern cvar_t	*g_footsteps;
+EXPORT extern cvar_t	*g_developer;
+EXPORT extern cvar_t	*sv_max_client_edicts;
+EXPORT extern cvar_t	*sv_voiceenable;
+EXPORT extern cvar_t	*sv_stepsize;
+EXPORT extern cvar_t	*sv_friction;
+EXPORT extern cvar_t	*sv_stopspeed;
+EXPORT extern cvar_t	*sv_maxspeed;
+EXPORT extern cvar_t	*sv_lowercase;
+EXPORT extern cvar_t	*sv_precache_bspmodels; // 0 gives the game more control over precaching
+
+struct NerfStats {
+	int nerfedMonsterHealth;
+	int nerfedMonsterSpawns;
+	int nerfedMonsterInfiniSpawns;
+	int skippedMonsterSpawns;
+	int skippedMonsterHealth;
+	int skippedMonsterInfiniSpawns;
+	int totalMonsters;
+	int totalMonsterHealth;
+};
+
+EXPORT extern NerfStats g_nerfStats;
+
+// flags texture types that are present in the current map
+// used to conditionally precache step/impact sounds
+struct TextureTypeStats {
+	bool tex_concrete;
+	bool tex_metal;
+	bool tex_dirt;
+	bool tex_duct;
+	bool tex_grate;
+	bool tex_tile;
+	bool tex_water;
+	bool tex_wood;
+	bool tex_computer;
+	bool tex_glass;
+	bool tex_flesh;
+};
+
+EXPORT extern TextureTypeStats g_textureStats;
+
+EXPORT extern std::string g_modelReplacementsMap; // model replacements for the current map (key for g_replacementFiles)
+EXPORT extern StringMap g_modelReplacementsMod; // model replacements for this mod
+EXPORT extern StringMap g_modelReplacements; // combined model replacements
+
+EXPORT extern std::string g_soundReplacementsMap; // sound replacements for the current map (key for g_replacementFiles)
+EXPORT extern StringMap g_soundReplacementsMod; // sound replacements for this mod
+EXPORT extern StringMap g_soundReplacements; // combined sound replacements
+
+EXPORT extern StringSet g_mapWeapons; // weapons which should be precached (don't use aliases here)
+EXPORT extern StringMap g_itemNameRemap; // item names remapped for everyone
+EXPORT extern StringMap g_itemNameRemapHL; // item names remapped for HL players only
+
+
+// map for each entity, containing custom keyvalues
+// using a global vector instead of a class member because the map is not POD
+EXPORT extern std::vector<HashMap<CKeyValue>> g_customKeyValues;
+
+EXPORT extern CKeyValue g_emptyKeyValue; // a keyvalue initialized with zeroes
+
+EXPORT extern StringSet g_shuffledMonsterSounds; // classes that had their sounds shuffled this map
+
+EXPORT extern bool g_cfgsExecuted; // set to true after server and map cfgs are executed
+
+EXPORT extern StringSet g_nomaptrans; // trigger_changelevel disabled for these maps
+
+// lines in the cfg which could possibly be custom weapons. Not known until map plugins are loaded,
+// and map plugins aren't known until the cfg finishes parsing
+EXPORT extern std::vector<std::pair<std::string, std::string>> g_unrecognizedCfgEquipment;
+
+// custom weapons to be registered after the vanilla weapons are registered
+EXPORT extern std::vector<std::pair<std::string, std::string>> g_mapCfgWeaponRegistrations;
+
+// custom weapon aliases to be registered
+EXPORT extern std::vector<std::pair<std::string, std::string>> g_mapCfgCustomWeaponAliases;
+
+// custom ammo aliases to be registered
+EXPORT extern std::vector<std::pair<std::string, std::string>> g_mapCfgCustomAmmoAliases;
+
+// mark a palyer weapon for precaching (alias names are ok)
+EXPORT void AddPrecacheWeapon(std::string wepName);
+
+EXPORT extern CVoiceGameMgr g_VoiceGameMgr;
+EXPORT extern CMultiplayGameMgrHelper g_GameMgrHelper;
+
+struct player_score_t {
+	float frags;
+	float multiplier;
+	int deaths;
+};
+
+// maps a steam ID to their score, for preserving scores across level changes and disconnects
+EXPORT extern std::unordered_map<uint64_t, player_score_t> g_playerScores;
+EXPORT extern std::unordered_map<uint64_t, player_score_t> g_oldPlayerScores; // state on level load, used in case of map restarts
+
+struct player_inventory_t {
+	StringSet weapons;
+	int weaponClips[MAX_WEAPONS];
+	int	m_rgAmmo[MAX_AMMO_SLOTS];
+	int activeWeaponId;
+	float health;
+	float armor;
+	int flashlightBattery;
+	bool hasLongjump;
+};
+
+// inventory to keep across map changes
+EXPORT extern std::unordered_map<uint64_t, player_inventory_t> g_playerInventory;
+EXPORT extern std::unordered_map<uint64_t, float> g_playerIdleTimes; // Idle times carried over from the previous map
+EXPORT extern bool g_clearInventoriesNextMap; // true if player inventories should be cleared on the next map
+
+#endif		// GAME_H

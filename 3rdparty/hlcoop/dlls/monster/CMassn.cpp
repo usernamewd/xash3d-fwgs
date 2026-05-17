@@ -1,0 +1,218 @@
+#include "extdll.h"
+#include "plane.h"
+#include "util.h"
+#include "monsters.h"
+#include "schedule.h"
+#include "animation.h"
+#include "CTalkSquadMonster.h"
+#include "weapons.h"
+#include "CSoundEnt.h"
+#include "effects.h"
+#include "customentity.h"
+#include "CMassn.h"
+
+
+LINK_ENTITY_TO_CLASS(monster_male_assassin, CMassn)
+LINK_ENTITY_TO_CLASS(monster_assassin_repel, CMassnRepel)
+LINK_ENTITY_TO_CLASS(monster_massassin_dead, CDeadMassn)
+
+const char* CMassn::pDieSounds[] =
+{
+	"hgrunt/gr_die1.wav",
+	"hgrunt/gr_die2.wav",
+	"hgrunt/gr_die3.wav",
+};
+
+const char* CDeadMassn::m_szPoses[] = { "deadstomach", "deadside", "deadsitting" };
+
+void CMassn :: TraceAttack( entvars_t *pevAttacker, float flDamage, Vector vecDir, TraceResult *ptr, int bitsDamageType)
+{
+	// check for helmet shot
+	if (ptr->iHitgroup == 11)
+	{
+		// it's head shot anyways
+		ptr->iHitgroup = HITGROUP_HEAD;
+	}
+
+	CTalkSquadMonster::TraceAttack( pevAttacker, flDamage, vecDir, ptr, bitsDamageType );
+}
+
+void CMassn :: HandleAnimEvent( MonsterEvent_t *pEvent )
+{
+	switch( pEvent->event )
+	{
+		case HGRUNT_AE_DROP_GUN:
+			if (DropEquipment(0, false))
+				SetBodygroup( MAssassinBodygroup::Weapons, MAssassinWeapon::None );
+			break;
+
+		default:
+			CBaseGrunt::HandleAnimEvent( pEvent );
+			break;
+	}
+}
+
+void CMassn :: Spawn()
+{
+	BaseSpawn();
+
+	SetBodygroup(MAssassinBodygroup::Heads, m_iAssassinHead);
+	SetBodygroup(MAssassinBodygroup::Weapons, m_weaponModel);
+}
+
+void CMassn :: Precache()
+{
+	if (m_iAssassinHead == MAssassinHead::Random)
+	{
+		m_iAssassinHead = RANDOM_LONG(MAssassinHead::White, MAssassinHead::ThermalVision);
+	}
+
+	if (!(pev->weapons & ~FL_DONT_DROP_WEAPONS)) { // default equipment
+		pev->weapons |= MAssassinWeaponFlag::MP5 | MAssassinWeaponFlag::HandGrenade;
+	}
+
+	m_weaponModel = MAssassinWeapon::None;
+
+	if (FBitSet(pev->weapons, MAssassinWeaponFlag::MP5))
+	{
+		m_weaponModel = MAssassinWeapon::MP5;
+		m_cClipSize = MASSASSIN_MP5_CLIP_SIZE;
+	}
+	else if (FBitSet(pev->weapons, MAssassinWeaponFlag::SniperRifle))
+	{
+		m_weaponModel = MAssassinWeapon::SniperRifle;
+		m_cClipSize = MASSN_SNIPER_CLIP_SIZE;
+		m_flDistTooFar = 4096.0;
+		m_flDistLook = 4096.0;
+		maxShootDist = 4096;
+	}
+	else
+	{
+		m_weaponModel = MAssassinWeapon::None;
+		m_cClipSize = 0;
+		runFromHeavyDamage = false;
+	}
+
+	m_cAmmoLoaded = m_cClipSize;
+
+	m_flLastShot = gpGlobals->time;
+
+	// get voice pitch
+	if (RANDOM_LONG(0, 1))
+		m_voicePitch = 109 + RANDOM_LONG(0, 7);
+	else
+		m_voicePitch = 100;
+
+	// set base equipment flags
+	if (FBitSet(pev->weapons, MAssassinWeaponFlag::MP5)) {
+		m_iEquipment |= MEQUIP_MP5;
+	}
+	if (FBitSet(pev->weapons, MAssassinWeaponFlag::SniperRifle)) {
+		m_iEquipment |= MEQUIP_SNIPER;
+	}
+	if (FBitSet(pev->weapons, MAssassinWeaponFlag::HandGrenade)) {
+		m_iEquipment |= MEQUIP_HAND_GRENADE;
+	}
+	if (FBitSet(pev->weapons, MAssassinWeaponFlag::GrenadeLauncher)) {
+		m_iEquipment |= MEQUIP_GRENADE_LAUNCHER;
+	}
+
+	BasePrecache();
+	m_defaultModel = "models/massn.mdl";
+	PRECACHE_MODEL(GetModel());
+	
+	PRECACHE_SOUND_ARRAY(pDieSounds);
+	PRECACHE_SOUND(MASSN_FOLLOW_SOUND);
+	PRECACHE_SOUND(MASSN_UNFOLLOW_SOUND);
+}	
+
+void CMassn :: DeathSound ( void )
+{
+	EMIT_SOUND(ENT(pev), CHAN_VOICE, RANDOM_SOUND_ARRAY(pDieSounds), 1, ATTN_IDLE);
+}
+
+void CMassn::StartFollowingSound() {
+	EMIT_SOUND(ENT(pev), CHAN_VOICE, MASSN_FOLLOW_SOUND, 1, ATTN_NORM);
+}
+
+void CMassn::StopFollowingSound() {
+	EMIT_SOUND(ENT(pev), CHAN_VOICE, MASSN_UNFOLLOW_SOUND, 1, ATTN_NORM);
+}
+
+void CMassn::CantFollowSound() {
+}
+
+int CMassn::GetActivitySequence(Activity NewActivity) {
+	int iSequence = ACTIVITY_NOT_AVAILABLE;
+
+	switch (NewActivity)
+	{
+	case ACT_RANGE_ATTACK1:
+		// Sniper uses the same animations for mp5 and sniper
+		if (m_fStanding)
+		{
+			// get aimable sequence
+			iSequence = LookupSequence("standing_mp5");
+		}
+		else
+		{
+			// get crouching shoot
+			iSequence = LookupSequence("crouching_mp5");
+		}
+		break;
+	default:
+		iSequence = CBaseGrunt::GetActivitySequence(NewActivity);
+		break;
+	}
+
+	return iSequence;
+}
+
+void CMassn::KeyValue( KeyValueData* pkvd )
+{
+	if( FStrEq( "head", pkvd->szKeyName ) )
+	{
+		m_iAssassinHead = atoi( pkvd->szValue );
+		pkvd->fHandled = true;
+	}
+	else if( FStrEq( "standgroundrange", pkvd->szKeyName ) )
+	{
+		m_flStandGroundRange = atof( pkvd->szValue );
+		pkvd->fHandled = true;
+	}
+	else
+		CTalkSquadMonster::KeyValue( pkvd );
+}
+
+
+void CDeadMassn::Spawn(void)
+{
+	CBaseDead::BaseSpawn("models/hgrunt.mdl");
+	SetBloodColor(BloodColorHuman());
+
+	// map old bodies onto new bodies
+	//TODO: verify these
+	switch( pev->body )
+	{
+	case 0: // Grunt with Gun
+		pev->body = 0;
+		SetBodygroup( MAssassinBodygroup::Heads, MAssassinHead::White );
+		SetBodygroup( MAssassinBodygroup::Weapons, MAssassinWeapon::MP5 );
+		break;
+	case 1: // Commander with Gun
+		pev->body = 0;
+		SetBodygroup( MAssassinBodygroup::Heads, MAssassinHead::Black );
+		SetBodygroup( MAssassinBodygroup::Weapons, MAssassinWeapon::MP5 );
+		break;
+	case 2: // Grunt no Gun
+		pev->body = 0;
+		SetBodygroup( MAssassinBodygroup::Heads, MAssassinHead::White );
+		SetBodygroup( MAssassinBodygroup::Weapons, MAssassinWeapon::SniperRifle );
+		break;
+	case 3: // Commander no Gun
+		pev->body = 0;
+		SetBodygroup( MAssassinBodygroup::Heads, MAssassinHead::White );
+		SetBodygroup( MAssassinBodygroup::Weapons, MAssassinWeapon::None );
+		break;
+	}
+}

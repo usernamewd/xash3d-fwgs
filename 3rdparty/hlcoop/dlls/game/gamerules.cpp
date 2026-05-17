@@ -1,0 +1,703 @@
+/***
+*
+*	Copyright (c) 1996-2001, Valve LLC. All rights reserved.
+*	
+*	This product contains software technology licensed from Id 
+*	Software, Inc. ("Id Technology").  Id Technology (c) 1996 Id Software, Inc. 
+*	All Rights Reserved.
+*
+*   Use, distribution, and modification of this source code and/or resulting
+*   object code is restricted to non-commercial enhancements to products from
+*   Valve LLC.  All other use, distribution, or modification is prohibited
+*   without written permission from Valve LLC.
+*
+****/
+//=========================================================
+// GameRules.cpp
+//=========================================================
+
+#include	"extdll.h"
+#include	"util.h"
+#include	"CBasePlayer.h"
+#include	"gamerules.h"
+#include	"teamplay_gamerules.h"
+#include	"skill.h"
+#include	"game.h"
+#include "CGamePlayerEquip.h"
+#include "CBasePlayerWeapon.h"
+#include "PluginManager.h"
+#include "game.h"
+#include "CBaseDMStart.h"
+#include "hlds_hooks.h"
+#include "CWorld.h"
+#include "custom_weapon.h"
+#include "CAmmoCustom.h"
+
+#include <sstream>
+#include <string>
+#include <fstream>
+#include <algorithm>
+
+using namespace std;
+
+DLL_GLOBAL CGameRules*	g_pGameRules = NULL;
+extern DLL_GLOBAL BOOL	g_fGameOver;
+extern int gmsgDeathMsg;	// client dll messages
+extern int gmsgMOTD;
+
+StringSet g_nomaptrans;
+
+int g_teamplay = 0;
+
+//=========================================================
+//=========================================================
+BOOL CGameRules::CanHaveAmmo( CBasePlayer *pPlayer, const char *pszAmmoName )
+{
+	int iAmmoIndex;
+
+	if ( pszAmmoName )
+	{
+		iAmmoIndex = pPlayer->GetAmmoIndex( pszAmmoName );
+
+		if ( iAmmoIndex > -1 )
+		{
+			if ( pPlayer->AmmoInventory( iAmmoIndex ) < UTIL_GetMaxAmmo(pszAmmoName) )
+			{
+				// player has room for more of this type of ammo
+				return TRUE;
+			}
+		}
+	}
+
+	return FALSE;
+}
+
+//=========================================================
+//=========================================================
+edict_t *CGameRules :: GetPlayerSpawnSpot( CBasePlayer *pPlayer )
+{
+	return EntSelectSpawnPoint( pPlayer );
+}
+
+//=========================================================
+//=========================================================
+BOOL CGameRules::CanHavePlayerItem( CBasePlayer *pPlayer, CBasePlayerItem *pWeapon )
+{
+	// only living players can have items
+	if ( pPlayer->pev->deadflag != DEAD_NO )
+		return FALSE;
+
+	if (mp_one_pickup_per_player.value && (pWeapon->m_pickupPlayers & PLRBIT(pPlayer->edict()))) {
+		return FALSE;
+	}
+
+	CBasePlayerItem* item = pPlayer->GetNamedPlayerItem(STRING(pWeapon->pev->classname));
+	CBasePlayerWeapon* wep = item ? item->GetWeaponPtr() : NULL;
+
+	// have a single handed version of the weapon now. Give them the dual version
+	if (wep && wep->IsAkimboWeapon() && !wep->CanAkimbo())
+		return TRUE;
+
+	if ( pWeapon->pszAmmo1() )
+	{
+		if ( !CanHaveAmmo( pPlayer, pWeapon->pszAmmo1() ) )
+		{
+			// we can't carry anymore ammo for this gun. We can only 
+			// have the gun if we aren't already carrying one of this type
+			if ( pPlayer->HasPlayerItem( pWeapon ) )
+			{
+				return FALSE;
+			}
+		}
+	}
+	else
+	{		
+		if (item)
+		{
+			// weapon doesn't use ammo, don't take another if you already have it.
+			return FALSE;
+		}
+	}
+
+	// note: will fall through to here if GetItemInfo doesn't fill the struct!
+	return TRUE;
+}
+
+StringSet timeCriticalCvars = {
+	// to know what to precache during this frame
+	"mp_mergemodels",
+	"mp_bigmap",
+	"mp_default_medkit",
+	"mp_weaponhands",
+
+	// to decide if the map skill file should be skipped
+	"mp_skill_allow",
+};
+
+std::vector<std::pair<std::string, std::string>> g_unrecognizedCfgEquipment;
+std::vector<std::pair<std::string, std::string>> g_mapCfgWeaponRegistrations;
+std::vector<std::pair<std::string, std::string>> g_mapCfgCustomWeaponAliases;
+std::vector<std::pair<std::string, std::string>> g_mapCfgCustomAmmoAliases;
+std::vector<std::pair<std::string, std::string>> g_pluginCvarValues;
+extern int g_mapEquipIdx;
+
+void AddMapEquipment(std::string name, std::string value) {
+	if (g_mapEquipIdx >= MAX_EQUIP) {
+		ALERT(at_error, "Failed to add equipment '%s'. Max equipment reached.\n", name.c_str());
+		return;
+	}
+
+	g_mapEquipment[g_mapEquipIdx].itemName = ALLOC_STRING(name.c_str());
+	g_mapEquipment[g_mapEquipIdx].count = value.size() ? atoi(value.c_str()) : 1;
+
+	AddPrecacheWeapon(name);
+
+	g_mapEquipIdx++;
+}
+
+void AddMapPluginEquipment() {
+	for (auto pair : g_unrecognizedCfgEquipment) {
+		if (g_weaponClassIds.get(pair.first.c_str())) {
+			AddMapEquipment(pair.first, pair.second);
+		}
+	}
+	g_unrecognizedCfgEquipment.clear();
+}
+
+void SetPluginCvars() {
+	for (auto pair : g_pluginCvarValues) {
+		CVAR_SET_STRING(pair.first.c_str(), pair.second.c_str());
+	}
+	g_pluginCvarValues.clear();
+}
+
+void execMapCfg(const char* cfgPath, StringSet& openedCfgs) {
+	// Map CFGs are low trust so only whitelisted commands are allowed.
+	// Server owners shouldn't have to check each map for things like "rcon_password HAHA_GOT_YOU"
+
+	static StringSet whitelistCommands = {
+		"sv_gravity",
+		"sv_friction",
+		"sv_accelerate",
+		"sv_airaccelerate",
+		"sv_bounce",
+		"sv_maxspeed",
+		"sv_maxvelocity",
+		"sv_newunit",
+		"sv_rollspeed",
+		"sv_stepsize",
+		"sv_stopspeed",
+		"sv_wateraccelerate",
+		"sv_wateramp",
+		"sv_waterfriction",
+		"sv_ledgesize",
+		"sv_vis_test_limit",
+		"mp_decals",
+		"mp_falldamage",
+		"mp_flashlight",
+		"mp_footsteps",
+		"mp_forcerespawn",
+		"mp_fraglimit",
+		"mp_timelimit",
+		"mp_weaponstay",
+		"mp_friendlyfire",
+		"mp_soundvariety",
+		"mp_bulletsponges",
+		"mp_bulletspongemax",
+		"mp_maxmonsterrespawns",
+		"mp_mergemodels",
+		"mp_skill_allow",
+		"mp_bigmap",
+		"mp_max_pvs_corpses",
+		"killnpc",
+		"mp_npckill",
+		"mp_startflashlight",
+		"startarmor",
+		"starthealth",
+		"globalmodellist",
+		"globalsoundlist",
+		"sentence_file",
+		"materials_file",
+		"hud_file",
+		"include_cfg",
+		"skill_file",
+		"mp_shitcode",
+		"map_plugin",
+		"nosuit",
+		"nomedkit",
+		"nomaptrans",
+		"mp_npcidletalk",
+		"npc_dropweapons",
+		"mp_default_medkit",
+		"mp_weaponhands",
+		"mp_hevsuit_voice",
+		"mp_hud_color",
+		"mp_flashlight_drain",
+		"mp_flashlight_charge",
+		"mp_flashlight_size",
+		"mp_blood_scale",
+		"mp_blood_head",
+		"mp_blood_color_human",
+		"mp_blood_color_alien",
+		"mp_one_pickup_per_player",
+		"mp_keep_inventory",
+		"mp_use_only_pickups",
+	};
+
+	static StringSet itemNames = {
+		"weapon_crossbow",
+		"weapon_crowbar",
+		"weapon_knife",
+		"weapon_egon",
+		"weapon_gauss",
+		"weapon_handgrenade",
+		"weapon_hornetgun",
+		"weapon_mp5",
+		"weapon_9mmar",
+		"weapon_python",
+		"weapon_357",
+		"weapon_rpg",
+		"weapon_satchel",
+		"weapon_shotgun",
+		"weapon_snark",
+		"weapon_tripmine",
+		"weapon_glock",
+		"weapon_9mmhandgun",
+		"weapon_uzi",
+		"weapon_uziakimbo",
+		"weapon_m16",
+		"weapon_m249",
+		"weapon_saw",
+		"weapon_pipewrench",
+		"weapon_minigun",
+		"weapon_grapple",
+		"weapon_medkit",
+		"weapon_eagle",
+		"weapon_sniperrifle",
+		"weapon_displacer",
+		"weapon_shockrifle",
+
+		"ammo_crossbow",
+		"ammo_egonclip",
+		"ammo_gaussclip",
+		"ammo_mp5clip",
+		"ammo_9mmar",
+		"ammo_9mmbox",
+		"ammo_mp5grenades",
+		"ammo_argrenades",
+		"ammo_357",
+		"ammo_rpgclip",
+		"ammo_buckshot",
+		"ammo_glockclip",
+		"ammo_9mm",
+		"ammo_9mmclip",
+		"ammo_556",
+		"ammo_556clip",
+		"ammo_762",
+		"ammo_uziclip",
+		"ammo_spore",
+		"ammo_sporeclip",
+
+		"item_longjump",
+	};
+
+	memset(g_mapEquipment, 0, sizeof(EquipItem) * MAX_EQUIP);
+
+	int length;
+	char* cfgFile = (char*)LOAD_FILE_FOR_ME(cfgPath, &length);
+
+	// first cfg opened
+	if (openedCfgs.size() == 0) {
+		g_mapCfgExists = cfgFile;
+		g_noSuit = false;
+		g_noMedkit = false;
+	}
+
+	if (!cfgFile) {
+		if (openedCfgs.size() == 0) {
+			// precache default equipment
+			AddPrecacheWeapon("weapon_crowbar");
+			AddPrecacheWeapon("weapon_9mmhandgun");
+		}
+		
+		return;
+	}
+
+	g_mapEquipIdx = 0;
+
+	static StringSet fileRefs = {
+		"globalmodellist",
+		"globalsoundlist",
+		"sentence_file",
+		"materials_file",
+		"hud_file",
+		"skill_file",
+		"include_cfg"
+	};
+
+	std::vector<std::pair<std::string, std::string>> mapCfgEntityRemap;
+
+	std::stringstream data_stream(cfgFile);
+	string line;
+
+	openedCfgs.put(toLowerCase(normalize_path(cfgPath)).c_str());
+
+	while (std::getline(data_stream, line)) {
+		vector<string> parts = splitString(line, " \t");
+
+		if (parts.empty()) {
+			continue;
+		}
+
+		string name = trimSpaces(toLowerCase(parts[0]));
+		string value = sanitize_cvar_value(parts.size() > 1 ? trimSpaces(parts[1]) : "");
+
+		if (name.empty())
+			continue;
+
+		if (name == "include_cfg") {
+			std::string safepath = toLowerCase(normalize_path("maps/" + value));
+			if (openedCfgs.hasKey(safepath.c_str())) {
+				ALERT(at_warning, "include_cfg loading loop: %s -> %s\n", cfgPath, value.c_str());
+			}
+			else {
+				execMapCfg(safepath.c_str(), openedCfgs);
+			}
+		}
+
+		if (name == "nosuit") {
+			g_noSuit = true;
+			continue;
+		}
+
+		if (name == "nomedkit") {
+			g_noMedkit = true;
+			continue;
+		}
+
+		if (name == "mp_soundvariety") {
+			// footsteps are important enough to have a minimum of 2 for each type
+			g_footstepVariety = atoi(value.c_str()) > 2 ? 2 : 1;
+		}
+
+		if (name == "nomaptrans") {
+			g_nomaptrans.put(value.c_str());
+			continue;
+		}
+
+		if (name == "custom_weapon") {
+			string cname = parts.size() >= 3 ? sanitize_cvar_value(trimSpaces(parts[2])) : "";
+			string config = value + ".txt";
+			g_mapCfgWeaponRegistrations.push_back({cname, config});
+			continue;
+		}
+
+		if (name == "custom_ammo") {
+			string config = value + ".txt";
+			UTIL_RegisterAmmo(config.c_str());
+			continue;
+		}
+
+		if (name == "custom_weapon_alias") {
+			string alias = parts.size() >= 3 ? sanitize_cvar_value(trimSpaces(parts[2])) : "";
+			string cname = value;
+			g_mapCfgCustomWeaponAliases.push_back({ cname, alias });
+			continue;
+		}
+
+		if (name == "custom_ammo_alias") {
+			string alias = parts.size() >= 3 ? sanitize_cvar_value(trimSpaces(parts[2])) : "";
+			string cname = value;
+			g_mapCfgCustomAmmoAliases.push_back({ cname, alias });
+			continue;
+		}
+
+		if (name == "entity_remap") {
+			string newCname = parts.size() >= 3 ? sanitize_cvar_value(trimSpaces(parts[2])) : "";
+			string cname = value;
+			if (newCname.empty() || newCname == cname) {
+				ALERT(at_error, "entity_remap requires two unique classnames\n");
+			}
+			else {
+				mapCfgEntityRemap.push_back({ cname, newCname });
+			}
+			continue;
+		}
+
+		if (name == "hl_weapon_remap") {
+			string skWeapon = parts.size() >= 3 ? sanitize_cvar_value(trimSpaces(parts[2])) : "";
+			string hlWeapon = value;
+			if (skWeapon.find("weapon_") == 0 && hlWeapon.find("weapon_") == 0) {
+				g_weaponRemapHL.put(hlWeapon.c_str(), skWeapon.c_str());
+			}
+			else {
+				ALERT(at_error, "hl_weapon_remap takes two \"weapon_\" classnames, not \"%s\" and \"%s\"\n", hlWeapon.c_str(), skWeapon.c_str());
+			}
+			
+			continue;
+		}
+
+		if (name == "weapon_hud_file") {
+			int lastSlash = value.find_last_of("/");
+			if (lastSlash != -1) {
+				string folder = value.substr(0, lastSlash);
+				string cname = value.substr(lastSlash + 1);
+				ALERT(at_console, "Set default weapon HUD for '%s' to 'sprites/%s/%s.txt'\n",
+					cname.c_str(), folder.c_str(), cname.c_str());
+				UTIL_SetDefaultWeaponSpriteDir(cname.c_str(), folder.c_str());
+			}
+			
+			continue;
+		}
+
+		if (parts.size() > 1 && whitelistCommands.hasKey(name.c_str())) {
+			if (mp_prefer_server_maxspeed.value == 1 && name == "sv_maxspeed") {
+				int maxspeed = atoi(value.c_str());
+				if (maxspeed == 270 || maxspeed == 320) { // default speeds for Half-Life (320) and Sven Co-op (270)
+					ALERT(at_console, "mp_prefer_server_maxspeed: Ignoring \"sv_maxspeed %d\" set by map cfg.\n", maxspeed);
+					continue;
+				}
+			}
+
+			// model/sound lists must be loaded now or else other entities might precache the wrong files
+			if (fileRefs.hasKey(name.c_str())) {
+				KeyValueData dat;
+				dat.fHandled = false;
+				dat.szClassName = (char*)"worldspawn";
+				dat.szKeyName = (char*)name.c_str();
+				dat.szValue = (char*)value.c_str();
+				DispatchKeyValue(ENT(0), &dat);
+				continue;
+			}
+
+			// must know this value now to know what to precache during this frame
+			if (timeCriticalCvars.hasKey(name.c_str())) {
+				if (name == "mp_weaponhands") {
+					CVAR_SET_STRING(name.c_str(), value.c_str());
+				}
+				else {
+					CVAR_SET_FLOAT(name.c_str(), atoi(value.c_str()));
+				}
+				continue;
+			}
+
+			// map plugins need to be loaded now in case they define custom entities used in the bsp data
+			if (name == "map_plugin") {
+				g_pluginManager.AddPlugin(value.c_str(), true);
+				continue;
+			}
+
+			SERVER_COMMAND(UTIL_VarArgs("%s %s\n", name.c_str(), value.c_str()));
+		}
+		else if (itemNames.hasKey(name.c_str())) {
+			AddMapEquipment(name, value);
+		}
+		else {
+			// set plugin cvars that include dots to prevent changing anything sensitive in the game/engine
+			if (name.find(".") != string::npos) {
+				g_pluginCvarValues.push_back({ name, value });
+			}
+
+			g_unrecognizedCfgEquipment.push_back({ name, value });
+		}
+	}
+
+	FREE_FILE(cfgFile);
+
+	if (mp_default_medkit.value && !g_noMedkit) {
+		AddPrecacheWeapon("weapon_medkit");
+	}
+
+	for (auto item : mapCfgEntityRemap) {
+		string oldCname = item.first;
+		string newCname = item.second.size() ? item.second : item.first;
+
+		SpawnFunc oldSpawnFuncMod = UTIL_GetEntitySpawnFunc(oldCname.c_str(), SPAWNFUNC_SEARCH_MOD_ONLY);
+		SpawnFunc oldSpawnFuncPlugin = UTIL_GetEntitySpawnFunc(oldCname.c_str(), SPAWNFUNC_SEARCH_PLUGINS_ONLY);
+
+		if (!oldSpawnFuncPlugin && !oldSpawnFuncMod) {
+			ALERT(at_warning, "entity_remap applied to nonexistant class '%s'\n", oldCname.c_str());
+		}
+
+		SpawnFunc spawnFunc = UTIL_GetEntitySpawnFunc(newCname.c_str());
+
+		if (oldSpawnFuncMod == oldSpawnFuncPlugin && oldSpawnFuncPlugin == spawnFunc) {
+			ALERT(at_warning, "entity_remap for class '%s' has no effect (no plugins override it)\n", newCname.c_str());
+		}
+		// continue despite warnings in case a class is registered later via newly loaded plugin
+
+		if (spawnFunc)
+			g_entityRemap.put(oldCname.c_str(), spawnFunc);
+		else
+			ALERT(at_error, "entity_remap failed for nonexistent class '%s'\n", newCname.c_str());
+	}
+	
+}
+
+void execServerCfg() {
+	int length;
+	char* cfgFile = (char*)LOAD_FILE_FOR_ME("server.cfg", &length);
+
+	if (!cfgFile) {
+		return;
+	}
+
+	std::stringstream data_stream(cfgFile);
+	string line;
+
+	// not just doing "exec server.cfg" so that commands remain in order after parsing other CFGs.
+	while (std::getline(data_stream, line)) {
+		line = trimSpaces(line);
+		if (line.empty() || line[0] == '/') {
+			continue;
+		}
+
+		vector<string> parts = splitString(line, " \t");
+
+		if (parts.empty()) {
+			continue;
+		}
+
+		string name = trimSpaces(toLowerCase(parts[0]));
+		string value = sanitize_cvar_value(parts.size() > 1 ? trimSpaces(parts[1]) : "");
+		
+		// TODO: duplicated in map cfg exec
+		if (timeCriticalCvars.hasKey(name.c_str())) {
+			CVAR_SET_FLOAT(name.c_str(), atoi(value.c_str()));
+			continue;
+		}
+
+		SERVER_COMMAND(UTIL_VarArgs("%s\n", line.c_str()));
+	}
+
+	FREE_FILE(cfgFile);
+}
+
+void execSkillCfg(const char* fname, bool isMapSkill) {
+	int length;
+	char* cfgFile = (char*)LOAD_FILE_FOR_ME(fname, &length);
+
+	if (!cfgFile) {
+		return;
+	}
+
+	std::stringstream data_stream(cfgFile);
+	string line;
+
+	int numChanges = 0;
+
+	while (std::getline(data_stream, line))
+	{
+		vector<string> parts = splitString(line, " \t");
+
+		if (parts.size() < 2) {
+			continue;
+		}
+
+		string name = trimSpaces(parts[0]);
+		string value = sanitize_cvar_value(parts.size() > 1 ? trimSpaces(parts[1]) : "");
+		cvar_t* cvar = GetSkillCvar(name.c_str());
+
+		if (cvar) {
+			float oldVal = cvar->value;
+			float newVal = atof(value.c_str());
+
+			if (oldVal == newVal) {
+				continue;
+			}
+			
+			// set value now so that calculations can be done in future skill cfgs
+			CVAR_SET_FLOAT(name.c_str(), newVal);
+			numChanges++;
+		}
+	}
+
+	FREE_FILE(cfgFile);
+
+	if (isMapSkill && mp_skill_allow.value >= 1) {
+		ALERT(at_console, "Map skill cvars changed: %d\n", numChanges);
+	}
+}
+
+void execCfgs() {
+	// CFG execution must be done without mixing "exec asdf.cfg" and individual commands
+	// so that commands are executed in the correct order (map.cfg after server.cfg).
+	// The engine automatically exec's the "servercfgfile" cfg on the first server start,
+	// throwing another wrench into this system. Disable that with '+servercfg ""' on the
+	// server command line. The server CFG must run every map change to reset vars from the
+	// previous map, and respond to changes without a hard restart.
+	// 
+	// How do commands run out of order?
+	// Whenever "exec file.cfg" is called, it's command are moved to the back of the command list,
+	// meaning the order you call SERVER_COMMAND doesn't match the actual execution order. Commands
+	// are run one per frame, so you can't hackfix this by adding a delay to an important CFG either.	
+
+	StringSet openedCfgs;
+
+	execServerCfg();
+	execSkillCfg("skill.cfg", false);
+	RefreshSkillData(false);
+	execMapCfg(UTIL_VarArgs("maps/%s.cfg", STRING(gpGlobals->mapname)), openedCfgs);
+
+	if (mp_skill_allow.value != 0) {
+		const char* cfgPath = UTIL_VarArgs("maps/%s_skl.cfg", STRING(gpGlobals->mapname));
+
+		CWorld* world = (CWorld*)CBaseEntity::Instance(ENT(0));
+		if (world->m_skill_file) {
+			cfgPath = STRING(world->m_skill_file);
+		}
+
+		execSkillCfg(cfgPath, true);
+	}
+	RefreshSkillData(true);
+
+	SERVER_COMMAND("cfg_exec_finished\n");
+
+	SERVER_EXECUTE();
+}
+
+//=========================================================
+// instantiate the proper game rules object
+//=========================================================
+
+CGameRules *InstallGameRules( void )
+{
+	execCfgs();
+
+	g_teamplay = 0;
+	return new CHalfLifeMultiplay;
+	
+	// keeping other rules for reference only
+
+	/*
+	if ( !gpGlobals->deathmatch )
+	{
+		// generic half-life
+		g_teamplay = 0;
+		return new CHalfLifeRules;
+	}
+	else
+	{
+		if ( teamplay.value > 0 )
+		{
+			// teamplay
+
+			g_teamplay = 1;
+			return new CHalfLifeTeamplay;
+		}
+		if ((int)gpGlobals->deathmatch == 1)
+		{
+			// vanilla deathmatch
+			g_teamplay = 0;
+			return new CHalfLifeMultiplay;
+		}
+		else
+		{
+			// vanilla deathmatch??
+			g_teamplay = 0;
+			return new CHalfLifeMultiplay;
+		}
+	}
+	*/
+}
+
