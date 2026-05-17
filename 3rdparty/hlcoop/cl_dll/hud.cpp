@@ -1,0 +1,971 @@
+﻿/***
+*
+*	Copyright (c) 1996-2002, Valve LLC. All rights reserved.
+*	
+*	This product contains software technology licensed from Id 
+*	Software, Inc. ("Id Technology").  Id Technology (c) 1996 Id Software, Inc. 
+*	All Rights Reserved.
+*
+*   Use, distribution, and modification of this source code and/or resulting
+*   object code is restricted to non-commercial enhancements to products from
+*   Valve LLC.  All other use, distribution, or modification is prohibited
+*   without written permission from Valve LLC.
+*
+****/
+//
+// hud.cpp
+//
+// implementation of CHud class
+//
+
+#include "hud.h"
+#include "cl_util.h"
+#include <string.h>
+#include <stdio.h>
+#include "parsemsg.h"
+#include "hud_servers.h"
+#include "vgui_int.h"
+#include "vgui_TeamFortressViewport.h"
+#include "effects.h"
+#include "prediction_files.h"
+
+#include "demo.h"
+#include "demo_api.h"
+#include "vgui_ScorePanel.h"
+#include "engine_pv.h"
+
+void PM_InitTextureTypes();
+
+hud_player_info_t	 g_PlayerInfoList[MAX_PLAYERS+1];	   // player info from the engine
+extra_player_info_t  g_PlayerExtraInfo[MAX_PLAYERS+1];   // additional player info sent directly to the client dll
+
+extern int mouse_uncenter_phase;
+
+class CHLVoiceStatusHelper : public IVoiceStatusHelper
+{
+public:
+	virtual void GetPlayerTextColor(int entindex, int color[3])
+	{
+		color[0] = color[1] = color[2] = 255;
+
+		if( entindex >= 0 && entindex < sizeof(g_PlayerExtraInfo)/sizeof(g_PlayerExtraInfo[0]) )
+		{
+			int iTeam = g_PlayerExtraInfo[entindex].teamnumber;
+
+			if ( iTeam < 0 )
+			{
+				iTeam = 0;
+			}
+
+			iTeam = iTeam % iNumberOfTeamColors;
+
+			color[0] = iTeamColors[iTeam][0];
+			color[1] = iTeamColors[iTeam][1];
+			color[2] = iTeamColors[iTeam][2];
+		}
+	}
+
+	virtual void UpdateCursorState()
+	{
+		gViewPort->UpdateCursorState();
+	}
+
+	virtual int	GetAckIconHeight()
+	{
+		return ScreenHeight - gHUD.m_iFontHeight*3 - 6;
+	}
+
+	virtual bool			CanShowSpeakerLabels()
+	{
+		if( gViewPort && gViewPort->m_pScoreBoard )
+			return !gViewPort->m_pScoreBoard->isVisible();
+		else
+			return false;
+	}
+};
+static CHLVoiceStatusHelper g_VoiceStatusHelper;
+
+
+extern client_sprite_t *GetSpriteList(client_sprite_t *pList, const char *psz, int iRes, int iCount);
+
+extern float IN_GetMouseSensitivity();
+
+cvar_t *cl_lw = NULL;
+
+void ShutdownInput (void);
+
+//DECLARE_MESSAGE(m_Logo, Logo)
+int __MsgFunc_Logo(const char *pszName, int iSize, void *pbuf)
+{
+	return gHUD.MsgFunc_Logo(pszName, iSize, pbuf );
+}
+
+//DECLARE_MESSAGE(m_Logo, Logo)
+int __MsgFunc_ResetHUD(const char *pszName, int iSize, void *pbuf)
+{
+	return gHUD.MsgFunc_ResetHUD(pszName, iSize, pbuf );
+}
+
+int __MsgFunc_InitHUD(const char *pszName, int iSize, void *pbuf)
+{
+	gHUD.MsgFunc_InitHUD( pszName, iSize, pbuf );
+	return 1;
+}
+
+int __MsgFunc_ViewMode(const char *pszName, int iSize, void *pbuf)
+{
+	gHUD.MsgFunc_ViewMode( pszName, iSize, pbuf );
+	return 1;
+}
+
+int __MsgFunc_SetFOV(const char *pszName, int iSize, void *pbuf)
+{
+	return gHUD.MsgFunc_SetFOV( pszName, iSize, pbuf );
+}
+
+int __MsgFunc_Concuss(const char *pszName, int iSize, void *pbuf)
+{
+	return gHUD.MsgFunc_Concuss( pszName, iSize, pbuf );
+}
+
+int __MsgFunc_GameMode(const char *pszName, int iSize, void *pbuf )
+{
+	return gHUD.MsgFunc_GameMode( pszName, iSize, pbuf );
+}
+
+// TFFree Command Menu
+void __CmdFunc_OpenCommandMenu(void)
+{
+	if ( gViewPort )
+	{
+		gViewPort->ShowCommandMenu( gViewPort->m_StandardMenu );
+	}
+}
+
+
+void __CmdFunc_CloseCommandMenu(void)
+{
+	if ( gViewPort )
+	{
+		gViewPort->InputSignalHideCommandMenu();
+	}
+}
+
+void __CmdFunc_ForceCloseCommandMenu( void )
+{
+	if ( gViewPort )
+	{
+		gViewPort->HideCommandMenu();
+	}
+}
+
+void __CmdFunc_ToggleServerBrowser( void )
+{
+	if ( gViewPort )
+	{
+		gViewPort->ToggleServerBrowser();
+	}
+}
+
+// TFFree Command Menu Message Handlers
+int __MsgFunc_ValClass(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_ValClass( pszName, iSize, pbuf );
+	return 0;
+}
+
+int __MsgFunc_TeamNames(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_TeamNames( pszName, iSize, pbuf );
+	return 0;
+}
+
+int __MsgFunc_Feign(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_Feign( pszName, iSize, pbuf );
+	return 0;
+}
+
+int __MsgFunc_Detpack(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_Detpack( pszName, iSize, pbuf );
+	return 0;
+}
+
+int __MsgFunc_VGUIMenu(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_VGUIMenu( pszName, iSize, pbuf );
+	return 0;
+}
+
+int __MsgFunc_MOTD(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_MOTD( pszName, iSize, pbuf );
+	return 0;
+}
+
+int __MsgFunc_BuildSt(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_BuildSt( pszName, iSize, pbuf );
+	return 0;
+}
+
+int __MsgFunc_RandomPC(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_RandomPC( pszName, iSize, pbuf );
+	return 0;
+}
+ 
+int __MsgFunc_ServerName(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_ServerName( pszName, iSize, pbuf );
+	return 0;
+}
+
+int __MsgFunc_NextMap(const char* pszName, int iSize, void* pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_NextMap(pszName, iSize, pbuf);
+	return 0;
+}
+
+int __MsgFunc_TimeLeft(const char* pszName, int iSize, void* pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_TimeLeft(pszName, iSize, pbuf);
+	return 0;
+}
+
+int __MsgFunc_ScoreInfo(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_ScoreInfo( pszName, iSize, pbuf );
+	return 0;
+}
+
+int __MsgFunc_TagInfo(const char* pszName, int iSize, void* pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_TagInfo(pszName, iSize, pbuf);
+	return 0;
+}
+
+int __MsgFunc_PlayerPos(const char* pszName, int iSize, void* pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_PlayerPos(pszName, iSize, pbuf);
+	return 0;
+}
+
+int __MsgFunc_TeamScore(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_TeamScore( pszName, iSize, pbuf );
+	return 0;
+}
+
+int __MsgFunc_TeamInfo(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_TeamInfo( pszName, iSize, pbuf );
+	return 0;
+}
+
+int __MsgFunc_Spectator(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_Spectator( pszName, iSize, pbuf );
+	return 0;
+}
+
+int __MsgFunc_SpecFade(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_SpecFade( pszName, iSize, pbuf );
+	return 0;
+}
+
+int __MsgFunc_ResetFade(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_ResetFade( pszName, iSize, pbuf );
+	return 0;
+}
+
+int __MsgFunc_AllowSpec(const char *pszName, int iSize, void *pbuf)
+{
+	if (gViewPort)
+		return gViewPort->MsgFunc_AllowSpec( pszName, iSize, pbuf );
+	return 0;
+}
+
+int __MsgFunc_HudColor(const char* pszName, int iSize, void* pbuf)
+{
+	BEGIN_READ(pbuf, iSize);
+
+	uint32_t r = READ_BYTE();
+	uint32_t g = READ_BYTE();
+	uint32_t b = READ_BYTE();
+
+	gHUD.m_sv_hud_color = (r << 16) | (g << 8) | b;
+
+	return 1;
+}
+
+// This is called every time the DLL is loaded
+void CHud :: Init( void )
+{
+	HOOK_MESSAGE( Logo );
+	HOOK_MESSAGE( ResetHUD );
+	HOOK_MESSAGE( GameMode );
+	HOOK_MESSAGE( InitHUD );
+	HOOK_MESSAGE( ViewMode );
+	HOOK_MESSAGE( SetFOV );
+	HOOK_MESSAGE( Concuss );
+
+	// TFFree CommandMenu
+	HOOK_COMMAND( "+commandmenu", OpenCommandMenu );
+	HOOK_COMMAND( "-commandmenu", CloseCommandMenu );
+	HOOK_COMMAND( "ForceCloseCommandMenu", ForceCloseCommandMenu );
+	HOOK_COMMAND( "togglebrowser", ToggleServerBrowser );
+
+	HOOK_MESSAGE( ValClass );
+	HOOK_MESSAGE( TeamNames );
+	HOOK_MESSAGE( Feign );
+	HOOK_MESSAGE( Detpack );
+	HOOK_MESSAGE( MOTD );
+	HOOK_MESSAGE( BuildSt );
+	HOOK_MESSAGE( RandomPC );
+	HOOK_MESSAGE( ServerName );
+	HOOK_MESSAGE( NextMap );
+	HOOK_MESSAGE( TimeLeft );
+	HOOK_MESSAGE( ScoreInfo );
+	HOOK_MESSAGE( TagInfo );
+	HOOK_MESSAGE( PlayerPos );
+	HOOK_MESSAGE( TeamScore );
+	HOOK_MESSAGE( TeamInfo );
+
+	HOOK_MESSAGE( Spectator );
+	HOOK_MESSAGE( AllowSpec );
+	
+	HOOK_MESSAGE( SpecFade );
+	HOOK_MESSAGE( ResetFade );
+
+	HOOK_MESSAGE(HudColor);
+
+	// VGUI Menus
+	HOOK_MESSAGE( VGUIMenu );
+
+	HookEffectMessages();
+	HookPredictionMessages();
+
+	CVAR_CREATE( "hud_classautokill", "1", FCVAR_ARCHIVE | FCVAR_USERINFO );		// controls whether or not to suicide immediately on TF class switch
+	CVAR_CREATE( "hud_takesshots", "0", FCVAR_ARCHIVE );		// controls whether or not to automatically take screenshots at the end of a round
+
+
+	m_iLogo = 0;
+	m_iFOV = 0;
+	
+	std::string versionString = UTIL_VarArgs("%d", SEVENKEWP_VERSION);
+	CVAR_CREATE( "zoom_sensitivity_ratio", "1.2", FCVAR_ARCHIVE );
+	CVAR_CREATE( "cl_autowepswitch", "1", FCVAR_USERINFO|FCVAR_ARCHIVE );
+	CVAR_CREATE( "hlcoop_version", versionString.c_str(), 0);
+	CVAR_CREATE( "cl_class", "0", FCVAR_USERINFO|FCVAR_ARCHIVE);
+	CVAR_CREATE( "cl_map_pmdls", "1", FCVAR_USERINFO|FCVAR_ARCHIVE);
+	default_fov = CVAR_CREATE( "default_fov", "90", FCVAR_ARCHIVE );
+	m_pCvarStealMouse = CVAR_CREATE( "hud_capturemouse", "1", FCVAR_ARCHIVE );
+	m_pCvarDraw = CVAR_CREATE( "hud_draw", "1", FCVAR_ARCHIVE );
+	m_pCvarHudScale = CVAR_CREATE( "hud_scale", "-1", FCVAR_ARCHIVE );
+	m_hud_color = CVAR_CREATE("hud_color", "0", FCVAR_ARCHIVE);
+	m_hud_allow_sv_hud_color = CVAR_CREATE("cl_allow_sv_hud_color", "1", FCVAR_ARCHIVE);
+	cl_lw = gEngfuncs.pfnGetCvarPointer( "cl_lw" );
+
+	m_pSpriteList = NULL;
+
+	// Clear any old HUD list
+	if ( m_pHudList )
+	{
+		HUDLIST *pList;
+		while ( m_pHudList )
+		{
+			pList = m_pHudList;
+			m_pHudList = m_pHudList->pNext;
+			free( pList );
+		}
+		m_pHudList = NULL;
+	}
+
+	// In case we get messages before the first update -- time will be valid
+	m_flTime = 1.0;
+
+	m_Ammo.Init();
+	m_Health.Init();
+	m_SayText.Init();
+	m_Spectator.Init();
+	m_Geiger.Init();
+	m_Train.Init();
+	m_Battery.Init();
+	m_Flash.Init();
+	m_Message.Init();
+	m_StatusBar.Init();
+	m_DeathNotice.Init();
+	m_AmmoSecondary.Init();
+	m_TextMessage.Init();
+	m_StatusIcons.Init();
+	m_ClientStats.Init();
+	m_Fog.Init();
+	m_ClientUpdater.Init();
+	m_Nametags.Init();
+	m_Debug.Init();
+	m_HudConPrint.Init();
+	m_HudEntStatus.Init();
+	m_HudSprites.Init();
+	GetClientVoiceMgr()->Init(&g_VoiceStatusHelper, (vgui::Panel**)&gViewPort);
+
+	m_Menu.Init();
+	
+	ServersInit();
+
+	MsgFunc_ResetHUD(0, 0, NULL );
+
+	gEngfuncs.pfnClientCmd("richpresence_gamemode\n"); // reset
+	gEngfuncs.pfnClientCmd("richpresence_update\n");
+}
+
+// CHud destructor
+// cleans up memory allocated for m_rg* arrays
+CHud :: ~CHud()
+{
+	delete [] m_rghSprites;
+	delete [] m_rgrcRects;
+	delete [] m_rgrcRectsDefault;
+	delete [] m_rgszSpriteNames;
+
+	if ( m_pHudList )
+	{
+		HUDLIST *pList;
+		while ( m_pHudList )
+		{
+			pList = m_pHudList;
+			m_pHudList = m_pHudList->pNext;
+			free( pList );
+		}
+		m_pHudList = NULL;
+	}
+
+	ServersShutdown();
+}
+
+// GetSpriteIndex()
+// searches through the sprite list loaded from hud.txt for a name matching SpriteName
+// returns an index into the gHUD.m_rghSprites[] array
+// returns 0 if sprite not found
+int CHud :: GetSpriteIndex( const char *SpriteName )
+{
+	// look through the loaded sprite name list for SpriteName
+	for ( int i = 0; i < m_iSpriteCount; i++ )
+	{
+		if ( strncmp( SpriteName, m_rgszSpriteNames + (i * MAX_SPRITE_NAME_LENGTH), MAX_SPRITE_NAME_LENGTH ) == 0 )
+			return i;
+	}
+
+	return -1; // invalid sprite
+}
+
+void CHud :: VidInit( void )
+{
+	m_scrinfo.iSize = sizeof(m_scrinfo);
+	GetScreenInfo(&m_scrinfo);
+
+	// ----------
+	// Load Sprites
+	// ---------
+//	m_hsprFont = LoadSprite("sprites/%d_font.spr");
+
+	m_hsprLogo = 0;
+	m_hsprCursor = 0;
+	m_sv_hud_color = 0;
+
+	m_iRes = gHUD.GetDesiredSpriteRes();
+
+	if (mouse_uncenter_phase == 3) // reset mouse uncentering logic for new server connection
+		mouse_uncenter_phase = 2;
+
+	m_is_map_loaded = false;
+	m_hud_sprites_loaded = false;
+	m_fullyLoaded = false;
+
+	// this is probably going to annoy someone but HL only binds up to slot 5 which breaks weapon selection and big menus.
+	EngineClientCmd("bind 1 slot1\n");
+	EngineClientCmd("bind 2 slot2\n");
+	EngineClientCmd("bind 3 slot3\n");
+	EngineClientCmd("bind 4 slot4\n");
+	EngineClientCmd("bind 5 slot5\n");
+	EngineClientCmd("bind 6 slot6\n");
+	EngineClientCmd("bind 7 slot7\n");
+	EngineClientCmd("bind 8 slot8\n");
+	EngineClientCmd("bind 9 slot9\n");
+	EngineClientCmd("bind 0 slot10\n");
+
+	GetClientVoiceMgr()->VidInit();
+	m_Fog.VidInit();
+	m_HudConPrint.VidInit();
+	m_HudEntStatus.VidInit();
+	m_HudSprites.VidInit();
+}
+
+void CHud::LoadHudSprites(void) {
+	if (m_pSpriteList && m_pCvarHudScale->value != m_lastHudScale) {
+		m_pSpriteList = 0;
+		m_iSpriteCountAllRes = 0;
+
+		delete[] m_rghSprites;
+		delete[] m_rgrcRects;
+		delete[] m_rgrcRectsDefault;
+		delete[] m_rgszSpriteNames;
+	}
+	
+	// Only load this once
+	if (!m_pSpriteList)
+	{		
+		const char* customHudPath = FindGameFile("sprites/hlcoop/hud.txt");
+		const char* useHudPath = customHudPath ? customHudPath : "sprites/hud.txt";
+
+		// we need to load the hud.txt, and all sprites within
+		m_pSpriteList = SPR_GetList(useHudPath, &m_iSpriteCountAllRes);
+
+		m_lastHudScale = m_pCvarHudScale->value;
+
+		if (m_pSpriteList)
+		{
+			// count the number of sprites of the appropriate res
+			m_iSpriteCount = 0;
+			client_sprite_t *p = m_pSpriteList;
+			int j;
+			for ( j = 0; j < m_iSpriteCountAllRes; j++ )
+			{
+				if ( p->iRes == m_iRes )
+					m_iSpriteCount++;
+				p++;
+			}
+
+			// allocated memory for sprite handle arrays
+ 			m_rghSprites = new HSPRITE[MAX_HUD_SPRITES];
+			m_rgrcRects = new wrect_t[MAX_HUD_SPRITES];
+			m_rgrcRectsDefault = new wrect_t[MAX_HUD_SPRITES];
+			m_rgszSpriteNames = new char[MAX_HUD_SPRITES * MAX_SPRITE_NAME_LENGTH];
+
+			memset(m_rghSprites, 0, m_iSpriteCount * sizeof(HSPRITE));
+
+			p = m_pSpriteList;
+			int index = 0;
+			for ( j = 0; j < m_iSpriteCountAllRes; j++ )
+			{
+				if ( p->iRes == m_iRes )
+				{
+					char sz[256];
+					sprintf(sz, "sprites/%s.spr", p->szSprite);
+					
+					// only load the sprite in vanilla servers. Otherwise wait for replacement
+					// lists to be sent so we don't load more than needed
+					if (!IsSevenKewpServer())
+						m_rghSprites[index] = SPR_Load(sz);
+
+					m_rgrcRects[index] = p->rc;
+					m_rgrcRectsDefault[index] = p->rc;
+					strncpy( &m_rgszSpriteNames[index * MAX_SPRITE_NAME_LENGTH], p->szName, MAX_SPRITE_NAME_LENGTH );
+
+					index++;
+				}
+
+				p++;
+			}
+		}
+	}
+	else
+	{
+		memset(m_rghSprites, 0, m_iSpriteCount * sizeof(HSPRITE));
+
+		// we have already have loaded the sprite reference from hud.txt, but
+		// we need to make sure all the sprites have been loaded (we've gone through a transition, or loaded a save game)
+		client_sprite_t *p = m_pSpriteList;
+		int index = 0;
+		for ( int j = 0; j < m_iSpriteCountAllRes; j++ )
+		{
+			if ( p->iRes == m_iRes )
+			{
+				char sz[256];
+				sprintf( sz, "sprites/%s.spr", p->szSprite );
+				if (!IsSevenKewpServer()) // wait for replacement lists on sevenkewp servers
+					m_rghSprites[index] = SPR_Load(sz);
+				m_rgrcRects[index] = m_rgrcRectsDefault[index];
+				index++;
+			}
+
+			p++;
+		}
+	}
+}
+
+void CHud::ReplaceHudSprites(const char* fpath) {
+	int numSprites = 0;
+	client_sprite_t* sprList = fpath && fpath[0] ? SPR_GetList(fpath, &numSprites) : NULL;
+
+	static bool replacedIndexes[256];
+	memset(replacedIndexes, 0, sizeof(replacedIndexes));
+
+	if (sprList) {
+		for (int i = 0; i < numSprites; i++) {
+			client_sprite_t* p = sprList + i;
+
+			if (p->iRes != m_iRes)
+				continue;
+
+			char sz[256];
+			sprintf(sz, "sprites/%s.spr", p->szSprite);
+
+			int existingIdx = GetSpriteIndex(p->szName);
+
+			if (existingIdx != -1) {
+				m_rghSprites[existingIdx] = SPR_Load(sz);
+				m_rgrcRects[existingIdx] = p->rc;
+				replacedIndexes[existingIdx] = true;
+			}
+			else if (m_iSpriteCount < MAX_HUD_SPRITES) {
+				// new sprite defiend for this map
+				m_rghSprites[m_iSpriteCount] = SPR_Load(sz);
+				m_rgrcRects[m_iSpriteCount] = p->rc;
+				m_rgrcRectsDefault[m_iSpriteCount] = p->rc;
+				strncpy(&m_rgszSpriteNames[m_iSpriteCount * MAX_SPRITE_NAME_LENGTH], p->szName, MAX_SPRITE_NAME_LENGTH);
+				m_iSpriteCount++;
+				PRINTF("Loaded custom HUD icon: %s\n", p->szName);
+			}
+			else {
+				PRINTF("Exceeded max HUD sprites!\n");
+				break;
+			}
+		}
+	}
+
+	// load default sprites that weren't replaced
+	int index = 0;
+	for (int i = 0; i < m_iSpriteCountAllRes; i++)
+	{
+		client_sprite_t* p = m_pSpriteList + i;
+
+		if (p->iRes == m_iRes) {
+			if (!replacedIndexes[index]) {
+				char sz[256];
+				sprintf(sz, "sprites/%s.spr", p->szSprite);
+				m_rghSprites[index] = SPR_Load(sz);
+				m_rgrcRects[index] = m_rgrcRectsDefault[index];
+			}
+			index++;
+		}
+	}
+
+	m_Battery.ReloadSprites();
+	m_Flash.ReloadSprites();
+	m_Health.ReloadSprites();
+
+	m_hud_sprites_loaded = true;
+
+	PRINTF("Loaded sprites %d / 256\n", g_loadedSprites);
+}
+
+void CHud::ParseServerInfo() {
+	const char* sevenkewpVersion = gEngfuncs.ServerInfo_ValueForKey("skv");
+	m_sevenkewpVersion = atoi(sevenkewpVersion);
+	if (sevenkewpVersion[0] && m_sevenkewpVersion > 0) {
+		gEngfuncs.Con_Printf("SevenKewp server version %s\n", UTIL_SevenKewpClientString(m_sevenkewpVersion, false));
+	}
+	else {
+		gEngfuncs.Con_Printf("This is not a SevenKewp server. Some client features will be disabled.\n");
+		m_sevenkewpVersion = 0;
+	}
+
+	if (IsSevenKewpServer()) {
+		bool overrideDetected = false;
+		const char* serverHash = gEngfuncs.ServerInfo_ValueForKey("skmd5");
+		const char* myHash = UTIL_HashClientDataFiles(overrideDetected);
+
+		if (overrideDetected) {
+			PRINTF("SevenKewp data update aborted. The HUD and command menu may be broken.\n");
+		}
+		else if (strcmp(serverHash, myHash)) {
+			PRINTF("Preparing SevenKewp data update (%s != %s)\n", serverHash, myHash);
+			UTIL_DeleteClientDataFiles();
+			m_sevenkewpDataUpdating = true;
+		}
+		else {
+			PRINTF("SevenKewp data is up-to-date (%s)\n", serverHash);
+		}
+	}
+}
+
+void CHud::WorldInit(void) {
+	InitEnginePv();
+	LoadHudSprites();
+
+	if (!IsCompatibleSevenKewpServer()) {
+		ReplaceHudSprites(NULL); // a replacement path won't be coming. Finish loading HUD sprites now.
+	}
+
+	PM_InitTextureTypes();
+
+	// assumption: number_1, number_2, etc, are all listed and loaded sequentially
+	m_HUD_number_0 = GetSpriteIndex("number_0");
+
+	m_iFontHeight = m_rgrcRects[m_HUD_number_0].bottom - m_rgrcRects[m_HUD_number_0].top;
+
+	m_Ammo.VidInit();
+	m_Health.VidInit();
+	m_Spectator.VidInit();
+	m_Train.VidInit();
+	m_Battery.VidInit();
+	m_Flash.VidInit();
+	m_Message.VidInit();
+	m_DeathNotice.VidInit();
+
+	if (m_sevenkewpDataUpdating) {
+		m_sevenkewpDataUpdating = false;
+		gViewPort->ReloadCommandMenu();
+	}
+}
+
+int CHud::MsgFunc_Logo(const char *pszName,  int iSize, void *pbuf)
+{
+	BEGIN_READ( pbuf, iSize );
+
+	// update Train data
+	m_iLogo = READ_BYTE();
+
+	return 1;
+}
+
+float g_lastFOV = 0.0;
+
+/*
+============
+COM_FileBase
+============
+*/
+// Extracts the base name of a file (no path, no extension, assumes '/' as path separator)
+void COM_FileBase ( const char *in, char *out)
+{
+	int len, start, end;
+
+	len = strlen( in );
+	
+	// scan backward for '.'
+	end = len - 1;
+	while ( end && in[end] != '.' && in[end] != '/' && in[end] != '\\' )
+		end--;
+	
+	if ( in[end] != '.' )		// no '.', copy to end
+		end = len-1;
+	else 
+		end--;					// Found ',', copy to left of '.'
+
+
+	// Scan backward for '/'
+	start = len-1;
+	while ( start >= 0 && in[start] != '/' && in[start] != '\\' )
+		start--;
+
+	if ( in[start] != '/' && in[start] != '\\' )
+		start = 0;
+	else 
+		start++;
+
+	// Length of new sting
+	len = end - start + 1;
+
+	// Copy partial string
+	strncpy( out, &in[start], len );
+	// Terminate it
+	out[len] = 0;
+}
+
+/*
+=================
+HUD_IsGame
+
+=================
+*/
+int HUD_IsGame( const char *game )
+{
+	const char *gamedir;
+	char gd[ 1024 ];
+
+	gamedir = gEngfuncs.pfnGetGameDirectory();
+	if ( gamedir && gamedir[0] )
+	{
+		COM_FileBase( gamedir, gd );
+		if ( !stricmp( gd, game ) )
+			return 1;
+	}
+	return 0;
+}
+
+/*
+=====================
+HUD_GetFOV
+
+Returns last FOV
+=====================
+*/
+float HUD_GetFOV( void )
+{
+	if ( gEngfuncs.pDemoAPI->IsRecording() )
+	{
+		// Write it
+		int i = 0;
+		unsigned char buf[ 100 ];
+
+		// Active
+		*( float * )&buf[ i ] = g_lastFOV;
+		i += sizeof( float );
+
+		Demo_WriteBuffer( TYPE_ZOOM, i, buf );
+	}
+
+	if ( gEngfuncs.pDemoAPI->IsPlayingback() )
+	{
+		g_lastFOV = g_demozoom;
+	}
+	return g_lastFOV;
+}
+
+int CHud::MsgFunc_SetFOV(const char *pszName,  int iSize, void *pbuf)
+{
+	BEGIN_READ( pbuf, iSize );
+
+	int newfov = READ_BYTE();
+	int def_fov = CVAR_GET_FLOAT( "default_fov" );
+
+	//Weapon prediction already takes care of changing the fog. ( g_lastFOV ).
+	if ( cl_lw && cl_lw->value )
+		return 1;
+
+	g_lastFOV = newfov;
+
+	if ( newfov == 0 )
+	{
+		m_iFOV = def_fov;
+	}
+	else
+	{
+		m_iFOV = newfov;
+	}
+
+	// the clients fov is actually set in the client data update section of the hud
+
+	// Set a new sensitivity
+	if ( m_iFOV == def_fov )
+	{  
+		// reset to saved sensitivity
+		m_flMouseSensitivity = 0;
+	}
+	else
+	{  
+		// set a new sensitivity that is proportional to the change from the FOV default
+		m_flMouseSensitivity = IN_GetMouseSensitivity() * ((float)newfov / (float)def_fov) * CVAR_GET_FLOAT("zoom_sensitivity_ratio");
+	}
+
+	return 1;
+}
+
+
+void CHud::AddHudElem(CHudBase *phudelem)
+{
+	HUDLIST *pdl, *ptemp;
+
+//phudelem->Think();
+
+	if (!phudelem)
+		return;
+
+	pdl = (HUDLIST *)malloc(sizeof(HUDLIST));
+	if (!pdl)
+		return;
+
+	memset(pdl, 0, sizeof(HUDLIST));
+	pdl->p = phudelem;
+
+	if (!m_pHudList)
+	{
+		m_pHudList = pdl;
+		return;
+	}
+
+	ptemp = m_pHudList;
+
+	while (ptemp->pNext)
+		ptemp = ptemp->pNext;
+
+	ptemp->pNext = pdl;
+}
+
+float CHud::GetSensitivity( void )
+{
+	return m_flMouseSensitivity;
+}
+
+int CHud::GetDesiredSpriteRes() {
+	int iRes = 320;
+
+	if (m_pCvarHudScale->value > 0) {
+		static int resScales[4] = {
+			320, 640, 1280, 2560
+		};
+
+		int nScale = clamp(m_pCvarHudScale->value, 1, 4);
+		iRes = resScales[nScale - 1];
+	}
+	else {
+		if (ScreenWidth > 2560 && ScreenHeight > 1600)
+			iRes = 2560;
+		//else if (ScreenWidth >= 1280 && ScreenHeight > 720) // Valve scaling
+		else if (ScreenWidth >= 1280 && ScreenHeight > 768)
+			iRes = 1280;
+		else if (ScreenWidth >= 640)
+			iRes = 640;
+	}
+
+	return iRes;
+}
+
+float CHud::GetHudPixelScale() {
+	switch (GetDesiredSpriteRes()) {
+	case 2560:	return 3;
+	case 1280:	return 2;
+	case 640:	return 1;
+	case 320:	return 0.5f;
+	default:	return 1;
+	}
+}
+
+unsigned long CHud::GetHudColor() {
+	if (m_sv_hud_color && m_hud_allow_sv_hud_color->value)
+		return m_sv_hud_color;
+
+	if (m_cl_hud_color)
+		return m_cl_hud_color;
+
+	return RGB_YELLOWISH;
+}
+
+bool CHud::IsCompatibleSevenKewpServer() {
+	return m_sevenkewpVersion > 0
+		&& UTIL_AreSevenKewpVersionsCompatible(SEVENKEWP_VERSION, m_sevenkewpVersion);
+}

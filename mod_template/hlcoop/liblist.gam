@@ -1,0 +1,16 @@
+// Generated for the xash3d-fwgs port of SevenKewp.
+// See 3rdparty/hlcoop/README.md for setup instructions.
+game "Seven Kewp (xash3d-fwgs port)"
+url_info "https://github.com/wootguy/SevenKewp"
+url_dl ""
+version "1.0"
+size "37000000"
+svonly "0"
+secure "0"
+type "singleplayer_only"
+mpentity "info_player_deathmatch"
+gamedll "dlls/server.dll"
+gamedll_linux "dlls/server.so"
+gamedll_osx "dlls/server.dylib"
+cldll "0"
+fallback_dir "valve"

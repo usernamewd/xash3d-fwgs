@@ -114,6 +114,9 @@ SUBDIRS = [
 	Subproject('utils/xar',        lambda x: x.env.ENABLE_UTILS and x.env.ENABLE_XAR),
 	Subproject('utils/run-fuzzer', lambda x: x.env.ENABLE_FUZZER),
 
+	# SevenKewp Half-Life co-op mod port - opt-in via --enable-hlcoop
+	Subproject('3rdparty/hlcoop',  lambda x: x.env.ENABLE_HLCOOP),
+
 	# enabled on PSVita only
 	Subproject('ref/gl/vgl_shim',   lambda x: x.env.DEST_OS == 'psvita'),
 ]
@@ -195,6 +198,9 @@ def options(opt):
 
 	grp.add_option('--enable-fuzzer', action = 'store_true', dest = 'ENABLE_FUZZER', default = False,
 		help = 'enable building libFuzzer runner [default: %(default)s]' )
+
+	grp.add_option('--enable-hlcoop', action = 'store_true', dest = 'ENABLE_HLCOOP', default = False,
+		help = 'build the SevenKewp Half-Life co-op gamedll (3rdparty/hlcoop) via CMake [default: %(default)s]')
 
 	for i in SUBDIRS:
 		if not i.is_exists(opt):
@@ -412,6 +418,7 @@ def configure(conf):
 	conf.env.ENABLE_UTILS  = conf.options.ENABLE_UTILS
 	conf.env.ENABLE_XAR    = conf.options.ENABLE_XAR
 	conf.env.ENABLE_FUZZER = conf.options.ENABLE_FUZZER
+	conf.env.ENABLE_HLCOOP = conf.options.ENABLE_HLCOOP
 
 	if not conf.options.DEDICATED:
 		conf.env.SERVER = conf.options.ENABLE_DEDICATED

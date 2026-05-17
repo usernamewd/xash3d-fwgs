@@ -1,0 +1,413 @@
+#include "extdll.h"
+#include "plane.h"
+#include "util.h"
+#include "monsters.h"
+#include "schedule.h"
+#include "animation.h"
+#include "weapons.h"
+#include "env/CSoundEnt.h"
+#include "effects.h"
+#include "customentity.h"
+#include "explode.h"
+#include "CBaseButton.h"
+#include "CRoboGrunt.h"
+
+LINK_ENTITY_TO_CLASS(monster_robogrunt, CRoboGrunt)
+LINK_ENTITY_TO_CLASS(monster_robogrunt_repel, CRoboGruntRepel)
+
+const char* CRoboGrunt::pDeathSounds[] =
+{
+	"turret/tu_die.wav",
+	"turret/tu_die2.wav",
+	"turret/tu_die3.wav",
+};
+
+const char* CRoboGrunt::pAlertSounds[] =
+{
+	"rgrunt/rb_alert0.wav",
+	"rgrunt/rb_alert1.wav",
+};
+const char* CRoboGrunt::pAnswerSounds[] =
+{
+	"vox/green.wav",
+	"rgrunt/rb_answer1.wav",
+};
+const char* CRoboGrunt::pChargeSounds[] =
+{
+	"vox/accelerating.wav",
+	"vox/engage.wav",
+};
+const char* CRoboGrunt::pCheckSounds[] =
+{
+	"rgrunt/rb_check0.wav",
+	"rgrunt/rb_check1.wav",
+};
+const char* CRoboGrunt::pClearSounds[] =
+{
+	"rgrunt/rb_clear0.wav",
+	"rgrunt/rb_clear1.wav",
+};
+const char* CRoboGrunt::pCoverSounds[] =
+{
+	"vox/dadeda.wav",
+	"vox/bizwarn.wav",
+};
+const char* CRoboGrunt::pGrenSounds[] =
+{
+	"rgrunt/rb_gren0.wav",
+	"rgrunt/rb_gren1.wav",
+};
+const char* CRoboGrunt::pMonstSounds[] =
+{
+	"vox/alert.wav",
+	"rgrunt/rb_monst1.wav",
+};
+const char* CRoboGrunt::pQuestSounds[] =
+{
+	"vox/status.wav",
+	"rgrunt/rb_quest1.wav",
+};
+const char* CRoboGrunt::pTauntSounds[] =
+{
+	"rgrunt/rb_taunt0.wav",
+	"rgrunt/rb_taunt1.wav",
+};
+const char* CRoboGrunt::pThrowSounds[] =
+{
+	"rgrunt/rb_throw0.wav",
+};
+
+const char* CRoboGrunt::pGruntSentences[] =
+{
+	"HG_GREN", // grenade scared grunt
+	"HG_ALERT", // sees player
+	"HG_MONSTER", // sees monster
+	"HG_COVER", // running to cover
+	"HG_THROW", // about to throw grenade
+	"HG_CHARGE",  // running out to get the enemy
+	"HG_TAUNT", // say rude things
+};
+
+void CRoboGrunt::Spawn() {
+	BaseSpawn();
+
+	if (FBitSet(pev->weapons, HGRUNT_SHOTGUN))
+	{
+		SetBodygroup(GUN_GROUP, GUN_SHOTGUN);
+		m_cClipSize = 8;
+	}
+	else if (FBitSet(pev->weapons, HGRUNT_ROCKETLAUNCHER))
+	{
+		SetBodygroup(GUN_GROUP, GUN_ROCKETLAUNCHER);
+		m_cClipSize = 1;
+		m_flDistTooFar = 4096.0;
+		m_flDistLook = 4096.0;
+		maxShootDist = 4096;
+	}
+	else if (m_iEquipment & MEQUIP_SNIPER)
+	{
+		SetBodygroup(GUN_GROUP, GUN_SNIPERRIFLE);
+		m_cClipSize = 1;
+		m_flDistTooFar = 4096.0;
+		m_flDistLook = 4096.0;
+		maxShootDist = 4096;
+	}
+	else
+	{
+		m_cClipSize = GRUNT_CLIP_SIZE;
+	}
+	m_cAmmoLoaded = m_cClipSize;
+
+	// get voice pitch
+	if (RANDOM_LONG(0, 1))
+		m_voicePitch = 120 + RANDOM_LONG(0, 9);
+	else
+		m_voicePitch = 115;
+}
+
+void CRoboGrunt::Precache()
+{
+	if (!(pev->weapons & ~FL_DONT_DROP_WEAPONS))
+	{
+		// initialize to original values
+		pev->weapons |= HGRUNT_9MMAR | HGRUNT_HANDGRENADE;
+		// pev->weapons = HGRUNT_SHOTGUN;
+		// pev->weapons = HGRUNT_9MMAR | HGRUNT_GRENADELAUNCHER;
+	}
+
+	// set base equipment flags
+	if (FBitSet(pev->weapons, HGRUNT_9MMAR)) {
+		m_iEquipment |= MEQUIP_MP5;
+	}
+	if (FBitSet(pev->weapons, HGRUNT_SHOTGUN)) {
+		m_iEquipment |= MEQUIP_SHOTGUN;
+	}
+	if (FBitSet(pev->weapons, HGRUNT_HANDGRENADE)) {
+		m_iEquipment |= MEQUIP_HAND_GRENADE;
+	}
+	if (FBitSet(pev->weapons, HGRUNT_GRENADELAUNCHER)) {
+		m_iEquipment |= MEQUIP_GRENADE_LAUNCHER;
+	}
+	if (FBitSet(pev->weapons, HGRUNT_ROCKETLAUNCHER)) {
+		m_iEquipment |= MEQUIP_RPG;
+	}
+	if (FBitSet(pev->weapons, HGRUNT_SNIPERRIFLE)) {
+		m_iEquipment |= MEQUIP_SNIPER;
+	}
+
+	BasePrecache();
+
+	m_defaultModel = "models/rgrunt.mdl";
+	PRECACHE_MODEL(GetModel());
+	PRECACHE_MODEL("models/computergibs.mdl");
+
+	m_iHeadshotSpr = PRECACHE_MODEL("sprites/xspark2.spr");
+
+	if (mp_npcidletalk.value) {
+		PRECACHE_SOUND_ARRAY(pAnswerSounds);
+		PRECACHE_SOUND_ARRAY(pCheckSounds);
+		PRECACHE_SOUND_ARRAY(pClearSounds);
+		PRECACHE_SOUND_ARRAY(pQuestSounds);
+	}
+
+	PRECACHE_SOUND_ARRAY(pDeathSounds);
+
+	PRECACHE_SOUND_ARRAY(pAlertSounds);
+	PRECACHE_SOUND_ARRAY(pChargeSounds);
+	PRECACHE_SOUND_ARRAY(pCoverSounds);
+	PRECACHE_SOUND_ARRAY(pGrenSounds);
+	PRECACHE_SOUND_ARRAY(pMonstSounds);
+	PRECACHE_SOUND_ARRAY(pTauntSounds);
+	PRECACHE_SOUND_ARRAY(pThrowSounds);
+	PRECACHE_SOUND_ARRAY(g_sparkSounds);
+
+	PRECACHE_SOUND(RGRUNT_FOLLOW_SOUND);
+	PRECACHE_SOUND(RGRUNT_UNFOLLOW_SOUND);
+}
+
+int	CRoboGrunt::Classify(void)
+{
+	return	CBaseMonster::Classify(CLASS_MACHINE);
+}
+
+const char* CRoboGrunt::DisplayName() {
+	return m_displayName ? CBaseMonster::DisplayName() : "Robot Grunt";
+}
+
+const char* CRoboGrunt::GetDeathNoticeWeapon() {
+	return !IsAlive() ? "grenade" : CBaseGrunt::GetDeathNoticeWeapon();
+}
+
+void CRoboGrunt::GibMonster(void)
+{
+	if (m_didExplosion) {
+		return;
+	}
+	m_didExplosion = true;
+	pev->takedamage = DAMAGE_NO; // don't gib again from the explosion damage coming now
+
+	int magnitude = 90;
+	ExplosionCreate(pev->origin + Vector(0, 0, 8), pev->angles, edict(), magnitude, false);
+
+	// damage done separately so that attacker is set
+	::RadiusDamage(pev->origin, pev, pev, magnitude, magnitude * 2.5, CLASS_NONE, DMG_BLAST);
+	CBaseGrunt::GibMonster();
+}
+
+void CRoboGrunt::Killed(entvars_t* pevAttacker, int iGib)
+{
+	CBaseGrunt::Killed(pevAttacker, iGib);
+
+	if (m_didExplosion || m_explodeTime > 0) {
+		return; // was gibbed in Killed() or Killed() called again after more damage(?)
+	}
+
+	EMIT_SOUND(ENT(pev), CHAN_BODY, RANDOM_SOUND_ARRAY(pDeathSounds), 1.0, ATTN_NORM);
+	SetThink(&CRoboGrunt::ExplodeThink);
+	pev->nextthink = gpGlobals->time + 0.1;
+	m_explodeTime = gpGlobals->time + 3.0f + RANDOM_FLOAT(0, 3.0f);
+}
+
+void CRoboGrunt::ExplodeThink(void)
+{
+	CBaseMonster::MonsterThink();
+
+	if (gpGlobals->time > m_explodeTime) {
+		GibMonster();
+		return;
+	}
+
+	// lots of smoke
+	Vector ori = Vector(
+		RANDOM_FLOAT(pev->absmin.x, pev->absmax.x),
+		RANDOM_FLOAT(pev->absmin.y, pev->absmax.y),
+		pev->origin.z + 16);
+	UTIL_Smoke(ori, g_sModelIndexSmoke, 25, 10);
+
+	pev->nextthink = gpGlobals->time + 0.2;
+}
+
+void CRoboGrunt::RunTask(Task_t* pTask)
+{
+	switch (pTask->iTask)
+	{
+	case TASK_DIE:
+	{
+		if (m_fSequenceFinished && pev->frame >= 255)
+		{
+			pev->deadflag = DEAD_DEAD;
+			StopAnimation();
+
+			if (!BBoxFlat())
+			{
+				// a bit of a hack. If a corpses' bbox is positioned such that being left solid so that it can be attacked will
+				// block the player on a slope or stairs, the corpse is made nonsolid. 
+//					pev->solid = SOLID_NOT;
+				UTIL_SetSize(pev, Vector(-4, -4, 0), Vector(4, 4, 1));
+			}
+			else // !!!HACKHACK - put monster in a thin, wide bounding box until we fix the solid type/bounding volume problem
+				UTIL_SetSize(pev, Vector(pev->mins.x, pev->mins.y, pev->mins.z), Vector(pev->maxs.x, pev->maxs.y, pev->mins.z + 1));
+		}
+		break;
+	}
+	default:
+		CBaseGrunt::RunTask(pTask);
+	}
+}
+
+void CRoboGrunt::TraceAttack(entvars_t* pevAttacker, float flDamage, Vector vecDir, TraceResult* ptr, int bitsDamageType)
+{
+	if (flDamage > 0) {
+		if (pev->deadflag != DEAD_DEAD) {
+			if ((bitsDamageType & DMG_ENERGYBEAM))
+				flDamage *= 2;
+			if ((bitsDamageType & DMG_SHOCK))
+				flDamage *= 4;
+		}
+		else if (RANDOM_LONG(0, 4) == 0) { // 25% chance damage triggers explosion on death
+			GibMonster();
+		}
+
+		if (ptr->iHitgroup == HITGROUP_HEAD) {
+			StartSound(edict(), CHAN_BODY, RANDOM_SOUND_ARRAY(g_sparkSounds), 1.0f, ATTN_NORM, 0, RANDOM_LONG(90, 110), pev->origin, 0xffffffff);
+
+			Vector sprPos = ptr->vecEndPos - Vector(0, 0, 10);
+
+			UTIL_Explosion(sprPos, m_iHeadshotSpr, RANDOM_LONG(6, 8), 50, 2 | 4 | 8);
+		}
+	}
+
+	bitsDamageType &= ~DMG_BLOOD; // never bleed
+
+	CBaseGrunt::TraceAttack(pevAttacker, flDamage, vecDir, ptr, bitsDamageType);
+}
+
+void CRoboGrunt::DeathSound(void)
+{
+	EMIT_SOUND(ENT(pev), CHAN_VOICE, RANDOM_SOUND_ARRAY(pDeathSounds), 1, ATTN_NORM);
+}
+
+void CRoboGrunt::IdleSound(void)
+{
+	if (!mp_npcidletalk.value) {
+		return;
+	}
+
+	if (FOkToSpeak() && (g_fGruntQuestion || RANDOM_LONG(0, 1)))
+	{
+		if (!g_fGruntQuestion)
+		{
+			// ask question or make statement
+			switch (RANDOM_LONG(0, 1))
+			{
+			case 0: // check in
+				//SENTENCEG_PlayRndSz(ENT(pev), "HG_CHECK", SENTENCE_VOLUME, ATTN_NORM, 0, m_voicePitch);
+				EMIT_SOUND_DYN(ENT(pev), CHAN_VOICE, RANDOM_SOUND_ARRAY(pCheckSounds), SENTENCE_VOLUME, GRUNT_ATTN, 0, m_voicePitch);
+				g_fGruntQuestion = 1;
+				break;
+			case 1: // question
+				//SENTENCEG_PlayRndSz(ENT(pev), "HG_QUEST", SENTENCE_VOLUME, ATTN_NORM, 0, m_voicePitch);
+				EMIT_SOUND_DYN(ENT(pev), CHAN_VOICE, RANDOM_SOUND_ARRAY(pQuestSounds), SENTENCE_VOLUME, GRUNT_ATTN, 0, m_voicePitch);
+				g_fGruntQuestion = 2;
+				break;
+			}
+		}
+		else
+		{
+			switch (g_fGruntQuestion)
+			{
+			case 1: // check in
+				//SENTENCEG_PlayRndSz(ENT(pev), "HG_CLEAR", SENTENCE_VOLUME, ATTN_NORM, 0, m_voicePitch);
+				EMIT_SOUND_DYN(ENT(pev), CHAN_VOICE, RANDOM_SOUND_ARRAY(pClearSounds), SENTENCE_VOLUME, GRUNT_ATTN, 0, m_voicePitch);
+				break;
+			case 2: // question 
+				//SENTENCEG_PlayRndSz(ENT(pev), "HG_ANSWER", SENTENCE_VOLUME, ATTN_NORM, 0, m_voicePitch);
+				EMIT_SOUND_DYN(ENT(pev), CHAN_VOICE, RANDOM_SOUND_ARRAY(pAnswerSounds), SENTENCE_VOLUME, GRUNT_ATTN, 0, m_voicePitch);
+				break;
+			}
+			g_fGruntQuestion = 0;
+		}
+		JustSpoke();
+	}
+}
+
+void CRoboGrunt::StartFollowingSound() {
+	EMIT_SOUND(ENT(pev), CHAN_VOICE, RGRUNT_FOLLOW_SOUND, 1.0f, GRUNT_ATTN);
+}
+
+void CRoboGrunt::StopFollowingSound() {
+	EMIT_SOUND(ENT(pev), CHAN_VOICE, RGRUNT_UNFOLLOW_SOUND, 1.0f, GRUNT_ATTN);
+}
+
+void CRoboGrunt::CantFollowSound() {
+	EMIT_SOUND(ENT(pev), CHAN_VOICE, RGRUNT_UNFOLLOW_SOUND, 1.0f, GRUNT_ATTN);
+}
+
+void CRoboGrunt::PlaySentenceSound(int sentenceType) {
+	if (sentenceType >= (int)ARRAYSIZE(pGruntSentences)) {
+		return;
+	}
+
+	//SENTENCEG_PlayRndSz(ENT(pev), pGruntSentences[sentenceType], SENTENCE_VOLUME, GRUNT_ATTN, 0, m_voicePitch);
+
+	switch (sentenceType) {
+	case 0:
+		EMIT_SOUND_DYN(ENT(pev), CHAN_VOICE, RANDOM_SOUND_ARRAY(pGrenSounds), SENTENCE_VOLUME, GRUNT_ATTN, 0, m_voicePitch);
+		break;
+	case 1:
+		EMIT_SOUND_DYN(ENT(pev), CHAN_VOICE, RANDOM_SOUND_ARRAY(pAlertSounds), SENTENCE_VOLUME, GRUNT_ATTN, 0, m_voicePitch);
+		break;
+	case 2:
+		EMIT_SOUND_DYN(ENT(pev), CHAN_VOICE, RANDOM_SOUND_ARRAY(pMonstSounds), SENTENCE_VOLUME, GRUNT_ATTN, 0, m_voicePitch);
+		break;
+	case 3:
+		EMIT_SOUND_DYN(ENT(pev), CHAN_VOICE, RANDOM_SOUND_ARRAY(pCoverSounds), SENTENCE_VOLUME, GRUNT_ATTN, 0, m_voicePitch);
+		break;
+	case 4:
+		EMIT_SOUND_DYN(ENT(pev), CHAN_VOICE, RANDOM_SOUND_ARRAY(pThrowSounds), SENTENCE_VOLUME, GRUNT_ATTN, 0, m_voicePitch);
+		break;
+	case 5:
+		EMIT_SOUND_DYN(ENT(pev), CHAN_VOICE, RANDOM_SOUND_ARRAY(pChargeSounds), SENTENCE_VOLUME, GRUNT_ATTN, 0, m_voicePitch);
+		break;
+	case 6:
+		EMIT_SOUND_DYN(ENT(pev), CHAN_VOICE, RANDOM_SOUND_ARRAY(pTauntSounds), SENTENCE_VOLUME, GRUNT_ATTN, 0, m_voicePitch);
+		break;
+	}
+}
+
+void CRoboGrunt::HandleAnimEvent(MonsterEvent_t* pEvent)
+{
+	Vector	vecShootDir;
+	Vector	vecShootOrigin;
+
+	switch (pEvent->event)
+	{
+	case HGRUNT_AE_DROP_GUN:
+		if (DropEquipment(0, false))
+			SetBodygroup(GUN_GROUP, GUN_NONE);
+		break;
+	default:
+		CBaseGrunt::HandleAnimEvent(pEvent);
+		break;
+	}
+}

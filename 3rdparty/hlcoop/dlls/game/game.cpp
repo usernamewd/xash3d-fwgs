@@ -1,0 +1,566 @@
+/***
+*
+*	Copyright (c) 1996-2001, Valve LLC. All rights reserved.
+*	
+*	This product contains software technology licensed from Id 
+*	Software, Inc. ("Id Technology").  Id Technology (c) 1996 Id Software, Inc. 
+*	All Rights Reserved.
+*
+*   Use, distribution, and modification of this source code and/or resulting
+*   object code is restricted to non-commercial enhancements to products from
+*   Valve LLC.  All other use, distribution, or modification is prohibited
+*   without written permission from Valve LLC.
+*
+****/
+#include "rehlds.h"
+#include "extdll.h"
+#include "eiface.h"
+#include "util.h"
+#include "game.h"
+#include "CBaseMonster.h"
+#include "skill.h"
+#include "PluginManager.h"
+#include "user_messages.h"
+#include "HashMap.h"
+#include "custom_weapon.h"
+#include "module_funcs.h"
+
+cvar_t	displaysoundlist = {"displaysoundlist","0", 0, 0, 0};
+
+// multiplayer server rules
+cvar_t	fragsleft = { "mp_fragsleft","0", FCVAR_SERVER | FCVAR_UNLOGGED, 0, 0 }; // Don't spam console/log files/users with this changing
+cvar_t	timeleft = { "mp_timeleft","0" , FCVAR_SERVER | FCVAR_UNLOGGED, 0, 0 }; // "      "
+
+// multiplayer server rules
+cvar_t	teamplay	= {"mp_teamplay","0", FCVAR_SERVER, 0, 0 };
+cvar_t	fraglimit	= {"mp_fraglimit","0", FCVAR_SERVER, 0, 0 };
+cvar_t	timelimit	= {"mp_timelimit","0", FCVAR_SERVER, 0, 0 };
+cvar_t	friendlyfire= {"mp_friendlyfire","0", FCVAR_SERVER, 0, 0 };
+cvar_t	falldamage	= {"mp_falldamage","1", FCVAR_SERVER, 0, 0 };
+cvar_t	weaponstay	= {"mp_weaponstay","0", FCVAR_SERVER, 0, 0 };
+cvar_t	item_despawn_time = {"mp_itemdespawntime","120", FCVAR_SERVER, 0, 0 };
+cvar_t	item_repick_time = {"mp_itemrepicktime","10", FCVAR_SERVER, 0, 0 };
+cvar_t	max_item_drops = {"mp_maxitemdrops","16", FCVAR_SERVER, 0, 0 };
+cvar_t	forcerespawn= {"mp_forcerespawn","1", FCVAR_SERVER, 0, 0 };
+cvar_t	flashlight	= {"mp_flashlight","1", FCVAR_SERVER, 0, 0 };
+cvar_t	aimcrosshair= {"mp_autocrosshair","1", FCVAR_SERVER, 0, 0 };
+cvar_t	decalfrequency = {"decalfrequency","30", FCVAR_SERVER, 0, 0 };
+cvar_t	teamlist = {"mp_teamlist","hgrunt;scientist", FCVAR_SERVER, 0, 0 };
+cvar_t	teamoverride = {"mp_teamoverride","1", 0, 0, 0 };
+cvar_t	defaultteam = {"mp_defaultteam","0", 0, 0, 0 };
+cvar_t	allowmonsters={"mp_allowmonsters","1", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_nextmap={"mp_nextmap","", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_prefer_server_maxspeed={"mp_prefer_server_maxspeed","1", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_objectboost ={"mp_objectboost","0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_explosionbug ={"mp_explosionbug","0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_respawndelay ={"mp_respawndelay","3", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_debugmsg ={"mp_debugmsg","0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_starthealth ={"starthealth","0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_startarmor ={"startarmor","0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_bulletsponges ={"mp_bulletsponges","1", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_bulletspongemax ={"mp_bulletspongemax","4", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_maxmonsterrespawns ={"mp_maxmonsterrespawns","-1", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_edictsorting ={"mp_edictsorting","1", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_shitcode ={"mp_shitcode","0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_mergemodels ={"mp_mergemodels","0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_killfeed ={"mp_killfeed","1", FCVAR_SERVER, 0, 0 };
+cvar_t	pluginlistfile ={"pluginlistfile","plugins.txt", FCVAR_SERVER, 0, 0 };
+cvar_t	adminlistfile ={"adminlistfile","admins.txt", FCVAR_SERVER, 0, 0 };
+cvar_t	pluginupdatepath ={"plugin_update_path","valve_pending/", FCVAR_SERVER, 0, 0 };
+cvar_t	pluginautoupdate ={"plugin_auto_update", "0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_skill_allow ={"mp_skill_allow", "1", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_default_medkit ={"mp_default_medkit", "0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_rpg_laser_mode ={"mp_rpg_laser_mode", "1", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_series_intermission ={"mp_series_intermission", "2", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_score_mode ={"mp_score_mode", "0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_damage_points ={"mp_damage_points", "0.01", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_antiblock ={"mp_antiblock", "1", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_antiblock_cooldown ={"mp_antiblock_cooldown", "3", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_min_score_mult ={"mp_min_score_mult", "20", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_hevsuit_voice ={"mp_hevsuit_voice", "0", FCVAR_SERVER, 0, 0 };
+cvar_t	npc_dropweapons ={"npc_dropweapons", "1", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_bigmap ={"mp_bigmap", "0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_max_pvs_corpses ={"mp_max_pvs_corpses", "32", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_weaponhands ={"mp_weaponhands", "", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_chat_interval ={"mp_chat_interval", "1.0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_perf ={"mp_perf", "0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_debug_tracers ={"mp_debug_tracers", "0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_sevenkewp_client_notice ={"mp_sevenkewp_client_notice", "0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_hud_color ={"mp_hud_color", "0", FCVAR_SERVER, 0, 0 };
+cvar_t	sv_colorcon ={"sv_colorcon", "1", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_flashlight_drain ={"mp_flashlight_drain", "1", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_flashlight_charge ={"mp_flashlight_charge", "1", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_flashlight_size ={"mp_flashlight_size", "8", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_startflashlight = { "mp_startflashlight","100", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_blood_scale = { "mp_blood_scale","1", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_blood_head = { "mp_blood_head","1", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_blood_color_human = { "mp_blood_color_human","247", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_blood_color_alien = { "mp_blood_color_alien","195", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_one_pickup_per_player = { "mp_one_pickup_per_player","0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_keep_inventory = { "mp_keep_inventory","0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_use_only_pickups = { "mp_use_only_pickups","0", FCVAR_SERVER, 0, 0 };
+
+cvar_t	soundvariety={"mp_soundvariety","0", FCVAR_SERVER, 0, 0 };
+cvar_t	mp_npcidletalk={"mp_npcidletalk","1", FCVAR_SERVER, 0, 0 };
+
+cvar_t	mp_npckill = { "mp_npckill", "1", FCVAR_SERVER, 0, 0 };
+cvar_t	killnpc = { "killnpc", "1", FCVAR_SERVER, 0, 0 };
+
+cvar_t  allow_spectators = { "allow_spectators", "0.0", FCVAR_SERVER, 0, 0 }; // 0 prevents players from being spectators
+
+cvar_t  mp_chattime = {"mp_chattime","10", FCVAR_SERVER, 0, 0 };
+
+cvar_t  mp_survival_supported = { "mp_survival_supported", "0", FCVAR_SERVER, 0, 0 };
+cvar_t  mp_survival_starton = { "mp_survival_starton", "0", FCVAR_SERVER, 0, 0 };
+cvar_t  mp_survival_restart = { "mp_survival_restart", "0", FCVAR_SERVER, 0, 0 };
+
+// Engine Cvars
+cvar_t 	*g_psv_gravity = NULL;
+cvar_t	*g_psv_aim = NULL;
+cvar_t* g_psv_allow_autoaim = NULL;
+cvar_t	*g_footsteps = NULL;
+cvar_t	*g_developer = NULL;
+cvar_t	*sv_max_client_edicts = NULL;
+cvar_t	*sv_voiceenable = NULL;
+cvar_t	*sv_stepsize = NULL;
+cvar_t	*sv_friction = NULL;
+cvar_t	*sv_stopspeed = NULL;
+cvar_t	*sv_maxspeed = NULL;
+cvar_t	*sv_lowercase = NULL;
+cvar_t	*sv_precache_bspmodels = NULL;
+
+// END Cvars for Skill Level settings
+
+std::string g_modelReplacementsMap;
+StringMap g_modelReplacementsMod;
+StringMap g_modelReplacements;
+
+std::string g_soundReplacementsMap;
+StringMap g_soundReplacementsMod;
+StringMap g_soundReplacements;
+
+StringSet g_mapWeapons;
+
+std::unordered_map<uint64_t, player_score_t> g_playerScores;
+std::unordered_map<uint64_t, player_score_t> g_oldPlayerScores;
+std::unordered_map<uint64_t, player_inventory_t> g_playerInventory;
+std::unordered_map<uint64_t, float> g_playerIdleTimes; // amount of idle time carried over from the previous map
+bool g_clearInventoriesNextMap = true;
+
+StringMap g_itemNameRemap = {
+	{"weapon_9mmar", "weapon_9mmAR"},
+	{"weapon_mp5", "weapon_9mmAR"},
+	{"weapon_m16", "weapon_9mmAR"},
+	{"weapon_python", "weapon_357"},
+	{"weapon_glock", "weapon_9mmhandgun"},
+
+	{"ammo_9mmar", "ammo_9mmAR"},
+	{"ammo_mp5clip", "ammo_9mmAR"},
+	{"ammo_glockclip", "ammo_9mmclip"},
+	{"ammo_9mm", "ammo_9mmclip"},
+	{"ammo_egonclip", "ammo_gaussclip"},
+	{"ammo_mp5grenades", "ammo_ARgrenades"},
+	{"ammo_argrenades", "ammo_ARgrenades"},
+
+	// keyvalues that should be ignored
+	{"equipmode", "<keyvalue>"},
+	{"delay", "<keyvalue>"},
+	{"inventorymode", "<keyvalue>"},
+	{"master", "<keyvalue>"},
+	{"killtarget", "<keyvalue>"},
+	{"ondestroyfn", "<keyvalue>"},
+};
+
+StringMap g_itemNameRemapHL = {
+	{"weapon_m249", "weapon_9mmAR"},
+	{"weapon_saw", "weapon_9mmAR"},
+	{"weapon_sniperrifle", "weapon_crossbow"},
+	{"weapon_uzi", "weapon_9mmAR"},
+	{"weapon_uziakimbo", "weapon_9mmAR"},
+	{"weapon_minigun", "weapon_9mmAR"},
+	{"weapon_eagle", "weapon_357"},
+	{"ammo_762", "ammo_crossbow"},
+	{"ammo_556clip", "ammo_9mmAR"},
+};
+
+void AddPrecacheWeapon(std::string wepName) {
+	const char* remap = g_itemNameRemap.get(wepName.c_str());
+	if (remap) {
+		g_mapWeapons.put(remap);
+	}
+	else {
+		g_mapWeapons.put(wepName.c_str());
+	}
+}
+
+NerfStats g_nerfStats;
+TextureTypeStats g_textureStats;
+bool g_cfgsExecuted;
+
+#include <algorithm>
+#include <fstream>
+
+void dump_missing_files() {
+	bool dumpMissing = !strcmp(CMD_ARGV(0), "dmiss");
+
+	std::vector<std::string> resList;
+
+	StringSet allPrecacheFiles;
+	allPrecacheFiles.putAll(g_tryPrecacheModels);
+	allPrecacheFiles.putAll(g_missingModels);
+	allPrecacheFiles.putAll(g_tryPrecacheGeneric);
+	allPrecacheFiles.putAll(g_tryPrecacheEvents);
+
+	StringSet::iterator_t iter;
+	while (g_tryPrecacheSounds.iterate(iter)) {
+		std::string putKey = iter.key;
+
+		if (strlen(iter.key) > 1) {
+			if (iter.key[0] == '*' || iter.key[0] == '!') {
+				putKey = iter.key + 1; // client will ignore this character and load the path after this
+			}
+		}
+
+		allPrecacheFiles.put(("sound/" + putKey).c_str());
+	}
+
+	StringSet::iterator_t iter2;
+	while (allPrecacheFiles.iterate(iter2)) {
+		std::string lowerItem = normalize_path(toLowerCase(iter2.key));
+
+		if (getGameFilePath(lowerItem.c_str()).empty() == dumpMissing) {
+			resList.push_back(lowerItem);
+		}
+	}
+
+	if (resList.empty()) {
+		g_engfuncs.pfnServerPrint(dumpMissing ? "No missing files\n" : "No precached files\n");
+		return;
+	}
+
+	sort(resList.begin(), resList.end());
+
+	std::ofstream resfile;
+	const char* suffix = dumpMissing ? ".miss" : ".res";
+	std::string fname = std::string("res/") + STRING(gpGlobals->mapname) + suffix;
+	resfile.open(fname, std::ios_base::trunc);
+
+	if (!resfile.is_open()) {
+		g_engfuncs.pfnServerPrint("Failed to open file in res/ folder (does it exist?)\n");
+		return;
+	}
+
+	for (int i = 0; i < (int)resList.size(); i++) {
+		std::string& item = resList[i];
+
+		if (i < 10)
+			g_engfuncs.pfnServerPrint(UTIL_VarArgs("Missing: %s\n", item.c_str()));
+
+		resfile << item + "\n";
+	}
+
+	if (resList.size() > 10) {
+		g_engfuncs.pfnServerPrint(UTIL_VarArgs("%d more items...\n", resList.size() - 10));
+	}
+
+	resfile.close();
+
+	g_engfuncs.pfnServerPrint(UTIL_VarArgs("Wrote %d %s files to %s\n",
+		(int)resList.size(), dumpMissing ? "missing" : "precached", fname.c_str()));
+}
+
+void reload_plugins() {
+	g_pluginManager.ReloadPlugins();
+}
+
+void list_plugins() {
+	g_pluginManager.ListPlugins(NULL);
+}
+
+void remove_plugin() {
+	if (CMD_ARGC() < 2) {
+		return;
+	}
+
+	g_pluginManager.RemovePlugin(CMD_ARGV(1));
+}
+
+void reload_plugin() {
+	if (CMD_ARGC() < 2) {
+		return;
+	}
+
+	g_pluginManager.ReloadPlugin(CMD_ARGV(1));
+}
+
+void update_plugin() {
+	if (CMD_ARGC() < 2) {
+		return;
+	}
+
+	if (g_pluginManager.UpdatePlugin(CMD_ARGV(1))) {
+		g_engfuncs.pfnServerPrint("Plugin updated\n");
+	}
+}
+
+void update_plugins() {
+	g_pluginManager.UpdatePluginsFromList();
+
+	g_engfuncs.pfnServerPrint(UTIL_VarArgs("Searching update path \"%s\"\n", pluginupdatepath.string));
+	if (!g_pluginManager.UpdatePlugins()) {
+		g_engfuncs.pfnServerPrint("Plugins are up-to-date\n");
+	}
+}
+
+void list_plugin_commands() {
+	if (CMD_ARGC() < 2) {
+		g_pluginManager.ListPluginCommands(NULL);
+	}
+	else {
+		g_pluginManager.ListPluginCommands(CMD_ARGV(1));
+	}
+}
+
+void list_plugin_cvars() {
+	if (CMD_ARGC() < 2) {
+		g_pluginManager.ListPluginCvars(NULL);
+	}
+	else {
+		g_pluginManager.ListPluginCvars(CMD_ARGV(1));
+	}
+}
+
+void freespace_command() {
+	std::string path = CMD_ARGC() > 1 ? CMD_ARGS() : "";
+
+	if (path.empty()) {
+		static char gameDir[MAX_PATH];
+		GET_GAME_DIR(gameDir);
+
+		path = gameDir;
+	}
+
+	uint64_t bytes = getFreeSpace(path);
+	uint32_t gb = bytes / (1024ULL * 1024ULL * 1024ULL);
+
+	ALERT(at_console, "Free space at %s is %.2f GB\n", path.c_str(), (float)gb);
+}
+
+void list_precached_sounds() {
+	std::vector<std::string> allSounds;
+
+	StringSet::iterator_t iter;
+	while (g_tryPrecacheSounds.iterate(iter)) {
+		allSounds.push_back(iter.key);
+	}
+
+	sort(allSounds.begin(), allSounds.end());
+
+	for (std::string item : allSounds) {
+		g_engfuncs.pfnServerPrint(UTIL_VarArgs("    %s\n", item.c_str()));
+	}
+}
+
+void list_precached_models() {
+	std::vector<std::string> allModels;
+
+	StringSet::iterator_t iter;
+	while (g_tryPrecacheModels.iterate(iter)) {
+		allModels.push_back(iter.key);
+	}
+
+	sort(allModels.begin(), allModels.end());
+
+	for (std::string item : allModels) {
+		g_engfuncs.pfnServerPrint(UTIL_VarArgs("    %s\n", item.c_str()));
+	}
+}
+
+void list_global_states() {
+	gGlobalState.DumpGlobals();
+}
+
+void test_command() {
+}
+
+void cfg_exec_finished() {
+	g_cfgsExecuted = true;
+}
+
+void PrintEdictStatsCmd() {
+	PrintEntindexStats(false);
+}
+
+void PrintEdictStatsCmd2() {
+	PrintEntindexStats(true);
+}
+
+void FindSpawnFunc() {
+	if (CMD_ARGC() < 2) {
+		g_engfuncs.pfnServerPrint("Usage: spawnfunc <classname>\n");
+		return;
+	}
+
+	const char* clazz = CMD_ARGV(1);
+	bool foundAny = false;
+
+	g_engfuncs.pfnServerPrint(UTIL_VarArgs("Entity init functions for classname '%s'\n", clazz));
+
+	HMODULE thisModule = GetServerModule();
+	if (GetProcAddress(thisModule, clazz)) {
+		g_engfuncs.pfnServerPrint(UTIL_VarArgs("    server module\n"));
+		foundAny = true;
+	}
+
+	for (const Plugin& plugin : g_pluginManager.plugins) {
+		ENTITYINIT initFunc = (ENTITYINIT)GetProcAddress((HMODULE)plugin.h_module, clazz);
+		if (initFunc) {
+			g_engfuncs.pfnServerPrint(UTIL_VarArgs("    %s\n", plugin.fpath.c_str()));
+			foundAny = true;
+		}
+		
+	}
+
+	if (!foundAny) {
+		g_engfuncs.pfnServerPrint("    <no exports found>\n");
+	}
+}
+
+// Register your console variables here
+// This gets called one time when the game is initialied
+void GameDLLInit( void )
+{
+	g_engfuncs.pfnAddServerCommand("test", test_command);
+	g_engfuncs.pfnAddServerCommand("dcache", dump_missing_files);
+	g_engfuncs.pfnAddServerCommand("dmiss", dump_missing_files);
+	g_engfuncs.pfnAddServerCommand("cfg_exec_finished", cfg_exec_finished);
+	g_engfuncs.pfnAddServerCommand("edicts", PrintEdictStatsCmd);
+	g_engfuncs.pfnAddServerCommand("edictstats", PrintEdictStatsCmd2);
+	g_engfuncs.pfnAddServerCommand("reloadplugins", reload_plugins);
+	g_engfuncs.pfnAddServerCommand("listplugins", list_plugins);
+	g_engfuncs.pfnAddServerCommand("removeplugin", remove_plugin);
+	g_engfuncs.pfnAddServerCommand("reloadplugin", reload_plugin);
+	g_engfuncs.pfnAddServerCommand("updateplugin", update_plugin);
+	g_engfuncs.pfnAddServerCommand("updateplugins", update_plugins);
+	g_engfuncs.pfnAddServerCommand("listplugincmd", list_plugin_commands);
+	g_engfuncs.pfnAddServerCommand("listplugincvar", list_plugin_cvars);
+	g_engfuncs.pfnAddServerCommand("freespace", freespace_command);
+	g_engfuncs.pfnAddServerCommand("sounds", list_precached_sounds);
+	g_engfuncs.pfnAddServerCommand("models", list_precached_models);
+	g_engfuncs.pfnAddServerCommand("globals", list_global_states);
+	g_engfuncs.pfnAddServerCommand("spawnfunc", FindSpawnFunc);
+	
+	// Register cvars here:
+	g_psv_gravity = CVAR_GET_POINTER( "sv_gravity" );
+	g_psv_aim = CVAR_GET_POINTER( "sv_aim" );
+	g_psv_allow_autoaim = CVAR_GET_POINTER("sv_allow_autoaim");
+	g_footsteps = CVAR_GET_POINTER( "mp_footsteps" );
+	g_developer = CVAR_GET_POINTER( "developer" );
+	sv_max_client_edicts = CVAR_GET_POINTER( "sv_max_client_edicts" );
+	sv_voiceenable = CVAR_GET_POINTER( "sv_voiceenable" );
+	sv_stepsize = CVAR_GET_POINTER( "sv_stepsize" );
+	sv_friction = CVAR_GET_POINTER( "sv_friction" );
+	sv_stopspeed = CVAR_GET_POINTER( "sv_stopspeed" );
+	sv_maxspeed = CVAR_GET_POINTER( "sv_maxspeed" );
+	sv_lowercase = CVAR_GET_POINTER( "sv_lowercase" );
+	sv_precache_bspmodels = CVAR_GET_POINTER( "sv_precache_bspmodels" );
+
+	CVAR_REGISTER (&displaysoundlist);
+	CVAR_REGISTER( &allow_spectators );
+
+	CVAR_REGISTER (&teamplay);
+	CVAR_REGISTER (&fraglimit);
+	CVAR_REGISTER (&timelimit);
+
+	CVAR_REGISTER (&fragsleft);
+	CVAR_REGISTER (&timeleft);
+
+	CVAR_REGISTER (&friendlyfire);
+	CVAR_REGISTER (&falldamage);
+	CVAR_REGISTER (&weaponstay);
+	CVAR_REGISTER (&item_despawn_time);
+	CVAR_REGISTER (&item_repick_time);
+	CVAR_REGISTER (&max_item_drops);
+	CVAR_REGISTER (&forcerespawn);
+	CVAR_REGISTER (&flashlight);
+	CVAR_REGISTER (&aimcrosshair);
+	CVAR_REGISTER (&decalfrequency);
+	CVAR_REGISTER (&teamlist);
+	CVAR_REGISTER (&teamoverride);
+	CVAR_REGISTER (&defaultteam);
+	CVAR_REGISTER (&allowmonsters);
+	CVAR_REGISTER (&soundvariety);
+	CVAR_REGISTER (&mp_npckill);
+	CVAR_REGISTER (&killnpc);
+	CVAR_REGISTER (&mp_nextmap);
+	CVAR_REGISTER (&mp_prefer_server_maxspeed);
+	CVAR_REGISTER (&mp_objectboost);
+	CVAR_REGISTER (&mp_explosionbug);
+	CVAR_REGISTER (&mp_respawndelay);
+	CVAR_REGISTER (&mp_debugmsg);
+	CVAR_REGISTER (&mp_starthealth);
+	CVAR_REGISTER (&mp_startarmor);
+	CVAR_REGISTER (&mp_startflashlight);
+	CVAR_REGISTER (&mp_bulletsponges);
+	CVAR_REGISTER (&mp_bulletspongemax);
+	CVAR_REGISTER (&mp_maxmonsterrespawns);
+	CVAR_REGISTER (&mp_edictsorting);
+	CVAR_REGISTER (&mp_shitcode);
+	CVAR_REGISTER (&mp_mergemodels);
+	CVAR_REGISTER (&mp_killfeed);
+	CVAR_REGISTER (&pluginlistfile);
+	CVAR_REGISTER (&adminlistfile);
+	CVAR_REGISTER (&pluginupdatepath);
+	CVAR_REGISTER (&pluginautoupdate);
+	CVAR_REGISTER (&mp_skill_allow);
+	CVAR_REGISTER (&mp_default_medkit);
+	CVAR_REGISTER (&mp_rpg_laser_mode);
+	CVAR_REGISTER (&mp_npcidletalk);
+	CVAR_REGISTER (&mp_series_intermission);
+	CVAR_REGISTER (&mp_score_mode);
+	CVAR_REGISTER (&mp_damage_points);
+	CVAR_REGISTER (&mp_antiblock);
+	CVAR_REGISTER (&mp_antiblock_cooldown);
+	CVAR_REGISTER (&mp_min_score_mult);
+	CVAR_REGISTER (&mp_hevsuit_voice);
+	CVAR_REGISTER (&npc_dropweapons);
+	CVAR_REGISTER (&mp_bigmap);
+	CVAR_REGISTER (&mp_max_pvs_corpses);
+	CVAR_REGISTER (&mp_weaponhands);
+	CVAR_REGISTER (&mp_chat_interval);
+	CVAR_REGISTER (&mp_perf);
+	CVAR_REGISTER (&mp_debug_tracers);
+	CVAR_REGISTER (&mp_sevenkewp_client_notice);
+	CVAR_REGISTER (&mp_hud_color);
+	CVAR_REGISTER (&sv_colorcon);
+	CVAR_REGISTER (&mp_flashlight_drain);
+	CVAR_REGISTER (&mp_flashlight_charge);
+	CVAR_REGISTER (&mp_flashlight_size);
+	CVAR_REGISTER (&mp_blood_scale);
+	CVAR_REGISTER (&mp_blood_head);
+	CVAR_REGISTER (&mp_blood_color_human);
+	CVAR_REGISTER (&mp_blood_color_alien);
+	CVAR_REGISTER (&mp_one_pickup_per_player);
+	CVAR_REGISTER (&mp_keep_inventory);
+	CVAR_REGISTER (&mp_use_only_pickups);
+
+	CVAR_REGISTER (&mp_chattime);
+
+	CVAR_REGISTER (&mp_survival_supported);
+	CVAR_REGISTER (&mp_survival_starton);
+	CVAR_REGISTER (&mp_survival_restart);
+
+	RegisterSkillCvars();
+
+	init_weapon_custom_config_parser();
+
+// END REGISTER CVARS FOR SKILL LEVEL STUFF
+
+	SERVER_COMMAND( "exec skill.cfg\n" );
+
+	if (IS_DEDICATED_SERVER()) {
+		RehldsApi_Init();
+		RegisterRehldsHooks();
+	}
+}
+
